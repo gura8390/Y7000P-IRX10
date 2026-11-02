@@ -74,11 +74,11 @@ impl BackupStore {
         );
         let root = root.into();
         checked_path(&root)?;
-        let absolute = if root.try_exists()? {
-            root.canonicalize()?
-        } else {
-            std::path::absolute(&root)?
-        };
+        // Resolve existing ancestors even before the data directory exists. On
+        // Windows TEMP can contain an 8.3 alias; hashing absolute() before the
+        // first write and canonicalize() afterwards would bind one directory
+        // to two different identities and prevent legitimate recovery.
+        let absolute = canonical_future_directory(&root)?;
         let path = absolute
             .to_str()
             .context("Non-Unicode boot data directory")?
@@ -393,6 +393,34 @@ impl BackupStore {
         Ok(out)
     }
 }
+fn canonical_future_directory(path: &Path) -> Result<PathBuf> {
+    checked_path(path)?;
+    let mut ancestor = std::path::absolute(path)?;
+    let mut suffix = Vec::new();
+    loop {
+        match fs::symlink_metadata(&ancestor) {
+            Ok(meta) => {
+                ensure!(meta.is_dir(), "Boot data ancestor is not a directory");
+                let mut resolved = ancestor.canonicalize()?;
+                for component in suffix.into_iter().rev() {
+                    resolved.push(component);
+                }
+                checked_path(&resolved)?;
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                suffix.push(
+                    ancestor
+                        .file_name()
+                        .context("Boot data path has no existing ancestor")?
+                        .to_os_string(),
+                );
+                ensure!(ancestor.pop(), "Boot data path has no existing ancestor");
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
 fn bounded_read(path: &Path, max: usize) -> Result<Vec<u8>> {
     checked_path(path)?;
     let mut bytes = Vec::new();
@@ -421,6 +449,41 @@ fn checked_path(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn future_directory_binding_resolves_ancestor_alias_before_and_after_creation() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+        let parent = std::env::temp_dir().join(format!(
+            "JiksBootBackup-LongAncestor-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&parent).unwrap();
+        let wide: Vec<u16> = parent.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut buffer = vec![0u16; 32768];
+        let length =
+            unsafe { GetShortPathNameW(wide.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) };
+        assert!(length > 0 && (length as usize) < buffer.len());
+        // Volumes with 8.3 disabled return the long spelling. The existing
+        // ancestor/create/rebind invariant still runs there; CI's TEMP itself
+        // supplies the alias that originally reproduced this defect.
+        let alias = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]));
+        let root = alias.join("new-parent").join("new-data");
+        let machine = digest(b"fixture physical identity");
+        let before = BackupStore::bound(&root, machine.clone()).unwrap();
+        assert!(!root.exists());
+        fs::create_dir_all(&root).unwrap();
+        let after = BackupStore::bound(&root, machine.clone()).unwrap();
+        let long = BackupStore::bound(
+            parent.canonicalize().unwrap().join("new-parent/new-data"),
+            machine,
+        )
+        .unwrap();
+        assert_eq!(before.binding_key().unwrap(), after.binding_key().unwrap());
+        assert_eq!(before.binding_key().unwrap(), long.binding_key().unwrap());
+        assert!(parent.is_absolute() && parent.starts_with(std::env::temp_dir()));
+        fs::remove_dir_all(parent).unwrap();
+    }
     #[test]
     fn immutable_backup_blobs_and_restart_origin_are_verified_before_recovery() {
         let root = std::env::temp_dir().join(format!(
