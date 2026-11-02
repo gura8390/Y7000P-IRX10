@@ -1391,42 +1391,6 @@ public struct UpdateFromServer(ProjectInfo projectInfo, string patchNote)
     public string? Url = projectInfo.ProjectNewExePath;
 }
 
-public sealed record HardwareSensorSnapshot
-{
-    private readonly float[] _values = new float[Enum.GetValues<SensorItem>().Length];
-
-    public HardwareSensorSnapshot()
-    {
-        for (int i = 0; i < _values.Length; i++)
-            _values[i] = -1;
-    }
-
-    public float this[SensorItem item]
-    {
-        get => _values[(int)item];
-        init => _values[(int)item] = value;
-    }
-
-    public float GetValue(SensorItem item) => _values[(int)item];
-
-    public HardwareSensorSnapshot WithValue(SensorItem item, float value)
-    {
-        var copy = new HardwareSensorSnapshot();
-        Array.Copy(_values, copy._values, _values.Length);
-        copy._values[(int)item] = value;
-        return copy;
-    }
-
-    public HardwareSensorSnapshot WithValues(IReadOnlyDictionary<SensorItem, float> values)
-    {
-        var copy = new HardwareSensorSnapshot();
-        Array.Copy(_values, copy._values, _values.Length);
-        foreach (var (item, val) in values)
-            copy._values[(int)item] = val;
-        return copy;
-    }
-}
-
 public readonly record struct SensorSlot
 {
     public SensorItem Item { get; init; }

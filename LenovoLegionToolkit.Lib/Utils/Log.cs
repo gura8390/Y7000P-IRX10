@@ -27,9 +27,13 @@ public class Log
 
     public string LogPath => _logPath;
 
-    private Log()
+    private Log() : this(Path.Combine(Folders.AppData, "log"))
     {
-        _folderPath = Path.Combine(Folders.AppData, "log");
+    }
+
+    internal Log(string folderPath)
+    {
+        _folderPath = folderPath;
         Directory.CreateDirectory(_folderPath);
         _logPath = Path.Combine(_folderPath, $"log_{DateTime.UtcNow:yyyy_MM_dd_HH_mm_ss}.txt");
     }

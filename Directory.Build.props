@@ -1,13 +1,15 @@
 <Project>
   <PropertyGroup>
-    <Version>2.34.0.0</Version>
-    <FileVersion>2.34.0.0</FileVersion>
+    <Version>2.34.0.3</Version>
+    <FileVersion>2.34.0.3</FileVersion>
+    <InformationalVersion>2.34.0.3-y7000p-cpu90-testonly</InformationalVersion>
     <TargetFramework>net9.0-windows10.0.26100.0</TargetFramework>
     <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <Platforms>x64</Platforms>
     <Copyright>© 2026 Bartosz Cichecki, Kaguya, and Dr. Skinner</Copyright>
     <Nullable>enable</Nullable>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <NeutralLanguage>en</NeutralLanguage>
     <NuGetAudit>false</NuGetAudit>
     <BaseOutputPath>$(MSBuildThisFileDirectory)BuildLLT\bin\</BaseOutputPath>

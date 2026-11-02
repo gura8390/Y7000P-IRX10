@@ -34,6 +34,57 @@ public class AutomationProcessor(
 
     private List<AutomationPipeline> _pipelines = [];
     private CancellationTokenSource? _cts;
+    // Only events emitted by this startup execution context belong to its completion boundary.
+    // A global "startup running" flag would also capture unrelated hardware/background events.
+    private readonly AsyncLocal<StartupBatch?> _startupBatch = new();
+
+    private sealed class StartupBatch
+    {
+        private const int MaximumEvents = 128;
+        private readonly object _lock = new();
+        private readonly Queue<IAutomationEvent> _events = new();
+        private int _acceptedEvents;
+        private bool _closed;
+        private Exception? _failure;
+
+        public bool Enqueue(IAutomationEvent value)
+        {
+            lock (_lock)
+            {
+                if (_closed) return false;
+                if (_failure is not null) return true;
+                if (++_acceptedEvents > MaximumEvents)
+                {
+                    // Record errors here instead of throwing through an async-void event handler.
+                    _failure = new InvalidOperationException($"Startup automation event limit ({MaximumEvents}) exceeded. A derived event cycle may be present.");
+                    return true;
+                }
+                _events.Enqueue(value);
+                return true;
+            }
+        }
+
+        public bool TryTake(out IAutomationEvent value)
+        {
+            lock (_lock)
+            {
+                if (_failure is not null) throw _failure;
+                if (_events.TryDequeue(out value!)) return true;
+                // Closing and observing an empty queue must be atomic with concurrent event delivery.
+                _closed = true;
+                return false;
+            }
+        }
+
+        public void Close()
+        {
+            lock (_lock)
+            {
+                _closed = true;
+                _events.Clear();
+            }
+        }
+    }
 
     public bool IsEnabled => settings.Store.IsEnabled;
 
@@ -111,18 +162,49 @@ public class AutomationProcessor(
 
     #region Run
 
-    public void RunOnStartup()
+    public void RunOnStartup() => _ = RunOnStartupSafelyAsync();
+
+    private async Task RunOnStartupSafelyAsync()
+    {
+        // Keep the legacy fire-and-forget API, while observing failures now exposed by the Task API.
+        try { await RunOnStartupAsync().ConfigureAwait(false); }
+        catch (Exception ex) { Log.Instance.Trace($"Startup automation failed.", ex); }
+    }
+
+    public Task RunOnStartupAsync()
     {
         if (!IsEnabled)
         {
             Log.Instance.Trace($"Not enabled. Pipeline run on startup ignored.");
 
-            return;
+            return Task.CompletedTask;
         }
 
         Log.Instance.Trace($"Pipeline run on startup pending...");
 
-        Task.Run(() => ProcessEvent(new StartupAutomationEvent()));
+        return Task.Run(RunStartupBatchAsync);
+    }
+
+    private async Task RunStartupBatchAsync()
+    {
+        using (await _runLock.LockAsync().ConfigureAwait(false))
+        {
+            var previous = _startupBatch.Value;
+            var batch = new StartupBatch();
+            _startupBatch.Value = batch;
+            try
+            {
+                batch.Enqueue(new StartupAutomationEvent());
+                while (batch.TryTake(out var value))
+                    await RunPipelinesCoreAsync(value, failOnError: true).ConfigureAwait(false);
+            }
+            finally
+            {
+                // Failed batches cannot leak already queued descendants into a later thermal baseline.
+                batch.Close();
+                _startupBatch.Value = previous;
+            }
+        }
     }
 
     public async Task RunNowAsync(AutomationPipeline pipeline)
@@ -183,66 +265,72 @@ public class AutomationProcessor(
 
         using (await _runLock.LockAsync().ConfigureAwait(false))
         {
-            Log.Instance.Trace($"Run starting...");
+            await RunPipelinesCoreAsync(automationEvent, failOnError: false).ConfigureAwait(false);
+        }
+    }
 
-            if (_cts is not null)
-                await _cts.CancelAsync().ConfigureAwait(false);
+    private async Task RunPipelinesCoreAsync(IAutomationEvent automationEvent, bool failOnError)
+    {
+        Log.Instance.Trace($"Run starting...");
 
-            if (!IsEnabled)
-                return;
+        if (_cts is not null)
+            await _cts.CancelAsync().ConfigureAwait(false);
 
-            List<AutomationPipeline> pipelines;
-            using (await _ioLock.LockAsync().ConfigureAwait(false))
-                pipelines = _pipelines.ToList();
+        if (!IsEnabled)
+            return;
 
-            _cts = new CancellationTokenSource();
-            var ct = _cts.Token;
+        List<AutomationPipeline> pipelines;
+        using (await _ioLock.LockAsync().ConfigureAwait(false))
+            pipelines = _pipelines.ToList();
 
-            foreach (var pipeline in pipelines)
+        _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
+
+        foreach (var pipeline in pipelines)
+        {
+            if (ct.IsCancellationRequested)
             {
-                if (ct.IsCancellationRequested)
-                {
-                    Log.Instance.Trace($"Run interrupted.");
-                    break;
-                }
-
-                try
-                {
-                    if (automationEvent is StartupAutomationEvent &&
-                        !pipeline.RunOnStartup &&
-                        pipeline.Trigger is not OnStartupAutomationPipelineTrigger)
-                    {
-                        Log.Instance.Trace($"Pipeline configured to skip startup. [name={pipeline.Name}, trigger={pipeline.Trigger}, id={pipeline.Id}]");
-                        continue;
-                    }
-
-                    if (pipeline.Trigger is null || !await pipeline.Trigger.IsMatchingEvent(automationEvent).ConfigureAwait(false))
-                    {
-                        Log.Instance.Trace($"Pipeline triggers not satisfied. [name={pipeline.Name}, trigger={pipeline.Trigger}, steps.Count={pipeline.Steps.Count}]");
-                        continue;
-                    }
-
-                    Log.Instance.Trace($"Running pipeline... [name={pipeline.Name}, trigger={pipeline.Trigger}, steps.Count={pipeline.Steps.Count}]");
-
-                    var otherPipelines = pipelines.Where(p => p.Id != pipeline.Id).ToList();
-                    await pipeline.RunAsync(otherPipelines, ct).ConfigureAwait(false);
-
-                    Log.Instance.Trace($"Pipeline completed successfully. [name={pipeline.Name}, trigger={pipeline.Trigger}]");
-                }
-                catch (Exception ex)
-                {
-                    Log.Instance.Trace($"Pipeline run failed. [name={pipeline.Name}, trigger={pipeline.Trigger}]", ex);
-                }
-
-                if (pipeline.IsExclusive)
-                {
-                    Log.Instance.Trace($"Pipeline is exclusive. Breaking. [name={pipeline.Name}, trigger={pipeline.Trigger}, steps.Count={pipeline.Steps.Count}]");
-                    break;
-                }
+                Log.Instance.Trace($"Run interrupted.");
+                break;
             }
 
-            Log.Instance.Trace($"Run finished successfully.");
+            try
+            {
+                if (automationEvent is StartupAutomationEvent &&
+                    !pipeline.RunOnStartup &&
+                    pipeline.Trigger is not OnStartupAutomationPipelineTrigger)
+                {
+                    Log.Instance.Trace($"Pipeline configured to skip startup. [name={pipeline.Name}, trigger={pipeline.Trigger}, id={pipeline.Id}]");
+                    continue;
+                }
+
+                if (pipeline.Trigger is null || !await pipeline.Trigger.IsMatchingEvent(automationEvent).ConfigureAwait(false))
+                {
+                    Log.Instance.Trace($"Pipeline triggers not satisfied. [name={pipeline.Name}, trigger={pipeline.Trigger}, steps.Count={pipeline.Steps.Count}]");
+                    continue;
+                }
+
+                Log.Instance.Trace($"Running pipeline... [name={pipeline.Name}, trigger={pipeline.Trigger}, steps.Count={pipeline.Steps.Count}]");
+
+                var otherPipelines = pipelines.Where(p => p.Id != pipeline.Id).ToList();
+                await pipeline.RunAsync(otherPipelines, ct).ConfigureAwait(false);
+
+                Log.Instance.Trace($"Pipeline completed successfully. [name={pipeline.Name}, trigger={pipeline.Trigger}]");
+            }
+            catch (Exception ex)
+            {
+                Log.Instance.Trace($"Pipeline run failed. [name={pipeline.Name}, trigger={pipeline.Trigger}]", ex);
+                if (failOnError) throw;
+            }
+
+            if (pipeline.IsExclusive)
+            {
+                Log.Instance.Trace($"Pipeline is exclusive. Breaking. [name={pipeline.Name}, trigger={pipeline.Trigger}, steps.Count={pipeline.Steps.Count}]");
+                break;
+            }
         }
+
+        Log.Instance.Trace($"Run finished successfully.");
     }
 
     #endregion
@@ -327,6 +415,15 @@ public class AutomationProcessor(
 
     private async Task ProcessEvent(IAutomationEvent e)
     {
+        if (_startupBatch.Value is { } batch)
+        {
+            // EventHandler cannot await its subscribers. Enqueue before its synchronous return,
+            // then let the startup owner drain the event after the current pipeline releases it.
+            if (!batch.Enqueue(e))
+                Log.Instance.Trace($"Ignoring a late event from a completed startup batch. [type={e.GetType().Name}]");
+            return;
+        }
+
         var triggerMatches = await Task.WhenAll(_pipelines.SelectMany(p => p.AllTriggers)
                 .Select(async t => await t.IsMatchingEvent(e).ConfigureAwait(false)))
             .ConfigureAwait(false);

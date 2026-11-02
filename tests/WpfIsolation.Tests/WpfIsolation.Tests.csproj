@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>WpfIsolation.IsolatedHost</AssemblyName>
+    <ApplicationManifest>isolatedhost.manifest</ApplicationManifest>
+    <StartupObject>WpfIsolation.Tests.Program</StartupObject>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../LenovoLegionToolkit.WPF/LenovoLegionToolkit.WPF.csproj" />
+    <Content Include="../../LenovoLegionToolkit.WPF/App.xaml" Link="FixtureSource/App.xaml" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../LenovoLegionToolkit.WPF/**/*.xaml" Exclude="../../LenovoLegionToolkit.WPF/App.xaml" Link="FixtureSource/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

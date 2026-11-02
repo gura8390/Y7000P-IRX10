@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../LenovoLegionToolkit.Lib.Automation/LenovoLegionToolkit.Lib.Automation.csproj" />
+    <Compile Include="../Regression.Tests/RegressionTestHost.cs" Link="RegressionTestHost.cs" />
+  </ItemGroup>
+</Project>

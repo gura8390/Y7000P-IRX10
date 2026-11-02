@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Y7000p.ThermalValidation</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <SelfContained>false</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishReadyToRun>false</PublishReadyToRun>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../LenovoLegionToolkit.Lib/LenovoLegionToolkit.Lib.csproj" />
+  </ItemGroup>
+</Project>

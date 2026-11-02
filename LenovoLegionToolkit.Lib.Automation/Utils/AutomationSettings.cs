@@ -7,8 +7,12 @@ using LenovoLegionToolkit.Lib.Settings;
 
 namespace LenovoLegionToolkit.Lib.Automation.Utils;
 
-public class AutomationSettings() : AbstractSettings<AutomationSettings.AutomationSettingsStore>("automation.json")
+public class AutomationSettings : AbstractSettings<AutomationSettings.AutomationSettingsStore>
 {
+    public AutomationSettings() : base("automation.json") { }
+
+    internal AutomationSettings(string storageDirectory) : base("automation.json", storageDirectory) { }
+
     public class AutomationSettingsStore
     {
         public bool IsEnabled { get; set; }

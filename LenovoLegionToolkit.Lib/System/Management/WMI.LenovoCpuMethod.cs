@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Threading.Tasks;
+using LenovoLegionToolkit.Lib.Controllers;
 using static LenovoLegionToolkit.Lib.System.Management.WMI.LenovoDefaultValueInDifferentModeData;
 
 // ReSharper disable InconsistentNaming
@@ -36,10 +37,8 @@ public static partial class WMI
                 return (value, min, max, step);
             });
 
-        public static Task CPUSetLongTermPowerLimitAsync(int value) => CallAsync("root\\WMI",
-            $"SELECT * FROM LENOVO_CPU_METHOD",
-            "CPU_Set_LongTerm_PowerLimit",
-            new() { { "value", value } });
+        public static Task CPUSetLongTermPowerLimitAsync(int value) =>
+            CpuThermalWriteCoordinator.WriteAsync(CpuThermalWriteCoordinator.LongPowerId, value, SetThermalFieldLegacyAsync, ReadThermalFieldLegacyAsync);
 
         public static Task<(int value, int min, int max, int step)> CPUGetShortTermPowerLimitAsync() => CallAsync("root\\WMI",
             $"SELECT * FROM LENOVO_CPU_METHOD",
@@ -55,10 +54,8 @@ public static partial class WMI
                 return (value, min, max, step);
             });
 
-        public static Task CPUSetShortTermPowerLimitAsync(int value) => CallAsync("root\\WMI",
-            $"SELECT * FROM LENOVO_CPU_METHOD",
-            "CPU_Set_ShortTerm_PowerLimit",
-            new() { { "value", value } });
+        public static Task CPUSetShortTermPowerLimitAsync(int value) =>
+            CpuThermalWriteCoordinator.WriteAsync(CpuThermalWriteCoordinator.ShortPowerId, value, SetThermalFieldLegacyAsync, ReadThermalFieldLegacyAsync);
 
         public static Task<(int value, int min, int max, int step, int defaultValue)> CPUGetPeakPowerLimitAsync() => CallAsync("root\\WMI",
             $"SELECT * FROM LENOVO_CPU_METHOD",
@@ -75,10 +72,10 @@ public static partial class WMI
                 return (value, min, max, step, defaultValue);
             });
 
-        public static Task CPUSetPeakPowerLimitAsync(int value) => CallAsync("root\\WMI",
+        public static Task CPUSetPeakPowerLimitAsync(int value) => CpuThermalWriteCoordinator.WriteAsync(0x01030000, value, (_, v) => CallAsync("root\\WMI",
             $"SELECT * FROM LENOVO_CPU_METHOD",
             "CPU_Set_Peak_PowerLimit",
-            new() { { "CurrentPeakPowerLimit", value } });
+            new() { { "CurrentPeakPowerLimit", v } }));
 
         public static Task<(int value, int min, int max, int step, int defaultValue)> CPUGetCrossLoadingPowerLimitAsync() => CallAsync("root\\WMI",
             $"SELECT * FROM LENOVO_CPU_METHOD",
@@ -95,10 +92,10 @@ public static partial class WMI
                 return (value, min, max, step, defaultValue);
             });
 
-        public static Task CPUSetCrossLoadingPowerLimitAsync(int value) => CallAsync("root\\WMI",
+        public static Task CPUSetCrossLoadingPowerLimitAsync(int value) => CpuThermalWriteCoordinator.WriteAsync(0x01060000, value, (_, v) => CallAsync("root\\WMI",
             $"SELECT * FROM LENOVO_CPU_METHOD",
             "CPU_Set_Cross_Loading_PowerLimit",
-            new() { { "CurrentCpuCrossLoading", value } });
+            new() { { "CurrentCpuCrossLoading", v } }));
 
         public static Task<(int value, int min, int max, int step, int defaultValue)> GetAPUSPPTPowerLimitAsync() => CallAsync("root\\WMI",
             $"SELECT * FROM LENOVO_CPU_METHOD",
@@ -115,10 +112,10 @@ public static partial class WMI
                 return (value, min, max, step, defaultValue);
             });
 
-        public static Task SetAPUSPPTPowerLimitAsync(int value) => WMI.CallAsync("root\\WMI",
+        public static Task SetAPUSPPTPowerLimitAsync(int value) => CpuThermalWriteCoordinator.WriteAsync(0x01050000, value, (_, v) => WMI.CallAsync("root\\WMI",
             $"SELECT * FROM LENOVO_CPU_METHOD",
             "Set_APU_sPPT_PowerLimit",
-            new() { { "CurrentAPUsPPTPowerLimit", value } });
+            new() { { "CurrentAPUsPPTPowerLimit", v } }));
 
         public static Task<(int value, int min, int max, int step, int defaultValue)> CPUGetTemperatureControlAsync() => CallAsync("root\\WMI",
             $"SELECT * FROM LENOVO_CPU_METHOD",
@@ -135,14 +132,28 @@ public static partial class WMI
                 return (value, min, max, step, defaultValue);
             });
 
-        public static Task CPUSetTemperatureControlAsync(int value) => CallAsync("root\\WMI",
-            $"SELECT * FROM LENOVO_CPU_METHOD",
-            "CPU_Set_Temperature_Control",
-            new() { { "CurrentTemperatureControl", value } });
+        public static Task CPUSetTemperatureControlAsync(int value) =>
+            CpuThermalWriteCoordinator.WriteAsync(CpuThermalWriteCoordinator.TemperatureId, value, SetThermalFieldLegacyAsync, ReadThermalFieldLegacyAsync);
 
-        public static Task CPUSetOCDataAsync(byte mode, uint tuneId, int value) => CallAsync("root\\WMI",
+        private static Task SetThermalFieldLegacyAsync(uint id, int value) => id switch
+        {
+            CpuThermalWriteCoordinator.LongPowerId => CallAsync("root\\WMI", $"SELECT * FROM LENOVO_CPU_METHOD", "CPU_Set_LongTerm_PowerLimit", new() { { "value", value } }),
+            CpuThermalWriteCoordinator.ShortPowerId => CallAsync("root\\WMI", $"SELECT * FROM LENOVO_CPU_METHOD", "CPU_Set_ShortTerm_PowerLimit", new() { { "value", value } }),
+            CpuThermalWriteCoordinator.TemperatureId => CallAsync("root\\WMI", $"SELECT * FROM LENOVO_CPU_METHOD", "CPU_Set_Temperature_Control", new() { { "CurrentTemperatureControl", value } }),
+            _ => throw new ArgumentOutOfRangeException(nameof(id))
+        };
+
+        private static async Task<int> ReadThermalFieldLegacyAsync(uint id) => id switch
+        {
+            CpuThermalWriteCoordinator.LongPowerId => (await CPUGetLongTermPowerLimitAsync().ConfigureAwait(false)).value,
+            CpuThermalWriteCoordinator.ShortPowerId => (await CPUGetShortTermPowerLimitAsync().ConfigureAwait(false)).value,
+            CpuThermalWriteCoordinator.TemperatureId => (await CPUGetTemperatureControlAsync().ConfigureAwait(false)).value,
+            _ => throw new ArgumentOutOfRangeException(nameof(id))
+        };
+
+        public static Task CPUSetOCDataAsync(byte mode, uint tuneId, int value) => CpuThermalWriteCoordinator.ExecuteUserCpuWriteAsync(() => CallAsync("root\\WMI",
             $"SELECT * FROM LENOVO_CPU_METHOD",
             "CPU_Set_OC_Data",
-            new() { { "mode", Convert.ToByte(mode) }, {"TuneID", Convert.ToUInt32(tuneId) }, { "value", Convert.ToUInt32(value) } });
+            new() { { "mode", Convert.ToByte(mode) }, {"TuneID", Convert.ToUInt32(tuneId) }, { "value", Convert.ToUInt32(value) } }));
     }
 }

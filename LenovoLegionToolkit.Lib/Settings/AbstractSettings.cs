@@ -10,18 +10,20 @@ public abstract class AbstractSettings<T> where T : class, new()
 {
     protected readonly JsonSerializerSettings JsonSerializerSettings;
     private readonly string _settingsStorePath;
+    private readonly string _settingsStoreDirectory;
     private readonly string _fileName;
     private T? _store;
+    private readonly object _storeLock = new();
 
     protected virtual T Default => new();
 
     public T Store
     {
-        get => _store ??= LoadStore() ?? Default;
-        protected set => _store = value;
+        get { lock (_storeLock) return _store ??= LoadStore() ?? Default; }
+        protected set { lock (_storeLock) _store = value; }
     }
 
-    protected AbstractSettings(string filename)
+    protected AbstractSettings(string filename, string? storageDirectory = null)
     {
         JsonSerializerSettings = new()
         {
@@ -32,16 +34,15 @@ public abstract class AbstractSettings<T> where T : class, new()
         };
 
         _fileName = filename;
-        _settingsStorePath = Path.Combine(Folders.AppData, _fileName);
+        _settingsStoreDirectory = storageDirectory ?? Folders.AppData;
+        _settingsStorePath = Path.Combine(_settingsStoreDirectory, _fileName);
     }
 
     public void Save()
     {
         try
         {
-            var settingsSerialized = JsonConvert.SerializeObject(Store, JsonSerializerSettings);
-            Folders.EnsureParentDirectoryExists(_settingsStorePath);
-            File.WriteAllText(_settingsStorePath, settingsSerialized);
+            SynchronizeStoreOrThrow();
         }
         catch (Exception ex)
         {
@@ -59,25 +60,24 @@ public abstract class AbstractSettings<T> where T : class, new()
 
     public void Reset()
     {
-        _store = null;
+        lock (_storeLock) _store = null;
     }
 
     public virtual T? LoadStore()
     {
         T? store = null;
+        string? settingsSerialized = null;
         try
         {
-            if (!File.Exists(_settingsStorePath)) return null;
-
-            var settingsSerialized = File.ReadAllText(_settingsStorePath);
-            store = JsonConvert.DeserializeObject<T>(settingsSerialized, JsonSerializerSettings);
+            settingsSerialized = AtomicSettingsFile.ReadSnapshot(_settingsStorePath);
+            store = DeserializeStore(settingsSerialized);
 
             if (store is null)
-                TryBackup();
+                TryBackup(settingsSerialized);
         }
         catch
         {
-            TryBackup();
+            TryBackup(settingsSerialized);
         }
 
         return store;
@@ -87,9 +87,7 @@ public abstract class AbstractSettings<T> where T : class, new()
     {
         try
         {
-            var settingsSerialized = JsonConvert.SerializeObject(Store, JsonSerializerSettings);
-            Folders.EnsureParentDirectoryExists(_settingsStorePath);
-            File.WriteAllText(_settingsStorePath, settingsSerialized);
+            SynchronizeStoreOrThrow();
         }
         catch (Exception ex)
         {
@@ -97,17 +95,35 @@ public abstract class AbstractSettings<T> where T : class, new()
         }
     }
 
-    private void TryBackup()
+    // Critical UI actions need to distinguish a running in-memory change from a
+    // successfully persisted setting. Legacy callers retain their logging behavior.
+    public void SynchronizeStoreOrThrow()
+    {
+        lock (_storeLock)
+        {
+            var settingsSerialized = SerializeStore(Store);
+            AtomicSettingsFile.Write(_settingsStorePath, settingsSerialized);
+        }
+    }
+
+    protected virtual string SerializeStore(T store) => JsonConvert.SerializeObject(store, JsonSerializerSettings);
+
+    protected virtual T? DeserializeStore(string json) => JsonConvert.DeserializeObject<T>(json, JsonSerializerSettings);
+
+    private void TryBackup(string? failedSnapshot)
     {
         try
         {
-            if (!File.Exists(_settingsStorePath))
+            if (failedSnapshot is null && !File.Exists(_settingsStorePath))
                 return;
 
-            var backupFileName = $"{Path.GetFileNameWithoutExtension(_fileName)}_backup_{DateTime.UtcNow:yyyyMMddHHmmss}{Path.GetExtension(_fileName)}";
-            var backupFilePath = Path.Combine(Folders.AppData, backupFileName);
+            var backupFileName = $"{Path.GetFileNameWithoutExtension(_fileName)}_backup_{DateTime.UtcNow:yyyyMMddHHmmssfffffff}_{Guid.NewGuid():N}{Path.GetExtension(_fileName)}";
+            var backupFilePath = Path.Combine(_settingsStoreDirectory, backupFileName);
             Folders.EnsureParentDirectoryExists(backupFilePath);
-            File.Copy(_settingsStorePath, backupFilePath);
+            if (failedSnapshot is not null)
+                AtomicSettingsFile.Write(backupFilePath, failedSnapshot);
+            else
+                File.Copy(_settingsStorePath, backupFilePath);
         }
         catch (Exception ex)
         {

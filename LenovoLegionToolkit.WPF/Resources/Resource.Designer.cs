@@ -24,6 +24,8 @@ namespace LenovoLegionToolkit.WPF.Resources {
     [global::System.Runtime.CompilerServices.CompilerGeneratedAttribute()]
     public class Resource {
         
+        public static string ThermalShadowTitle => ResourceManager.GetString("ThermalShadowTitle", resourceCulture);
+        public static string ThermalShadowDescription => ResourceManager.GetString("ThermalShadowDescription", resourceCulture);
         private static global::System.Resources.ResourceManager resourceMan;
         
         private static global::System.Globalization.CultureInfo resourceCulture;

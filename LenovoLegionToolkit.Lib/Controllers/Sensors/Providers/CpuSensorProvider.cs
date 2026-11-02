@@ -48,6 +48,9 @@ public class CpuSensorProvider : ISensorProvider
     public IReadOnlySet<SensorItem> ProvidedSensorItems { get; } = new HashSet<SensorItem>
     {
         SensorItem.CpuUtilization, SensorItem.CpuFrequency, SensorItem.CpuTemperature, SensorItem.CpuPower,
+        SensorItem.CpuVoltage, SensorItem.CpuMaxFrequency, SensorItem.CpuAverageFrequency,
+        SensorItem.CpuPMaxFrequency, SensorItem.CpuPAverageFrequency,
+        SensorItem.CpuEMaxFrequency, SensorItem.CpuEAverageFrequency,
     };
     public IReadOnlySet<OsdItem> ProvidedOsdItems { get; } = new HashSet<OsdItem>
     {
@@ -67,17 +70,7 @@ public class CpuSensorProvider : ISensorProvider
 
     public void Discover(IReadOnlyList<IHardware> hardware)
     {
-        _sensors.Clear();
-        _coreClocks = [];
-        _pCoreClocks = [];
-        _eCoreClocks = [];
-        _averageTemperatureSensor = null;
-        _packageTemperatureSensor = null;
-        _maxTemperatureSensor = null;
-        _coreTemperatureSensors = [];
-        _powerMonitor.Reset();
-        IsAvailable = false;
-        IsHybrid = false;
+        Reset();
 
         var cpu = hardware.FirstOrDefault(h => h.HardwareType == HardwareType.Cpu);
         if (cpu?.Sensors == null) return;
@@ -140,6 +133,11 @@ public class CpuSensorProvider : ISensorProvider
         IsHybrid = pCoreList.Count > 0;
     }
 
+    // Control telemetry never falls back to an average temperature.
+    public float? PackageTemperature => _packageTemperatureSensor?.Value;
+    public float? CoreMaxTemperature => _maxTemperatureSensor?.Value ??
+        (_coreTemperatureSensors.Count > 0 ? _coreTemperatureSensors.Max(s => s.Value) : null);
+
     public void Read()
     {
         var values = new Dictionary<SensorItem, float>();
@@ -170,7 +168,7 @@ public class CpuSensorProvider : ISensorProvider
         values[SensorItem.CpuVoltage] = VoltageMode switch
         {
             CpuVoltageMode.Maximum when _coreVoltageSensors.Count > 0 => _coreVoltageSensors.Max(s => s.Value) ?? -1,
-            CpuVoltageMode.Core when VoltageCoreIndex < _coreVoltageSensors.Count => _coreVoltageSensors[VoltageCoreIndex].Value ?? -1,
+            CpuVoltageMode.Core when VoltageCoreIndex >= 0 && VoltageCoreIndex < _coreVoltageSensors.Count => _coreVoltageSensors[VoltageCoreIndex].Value ?? -1,
             CpuVoltageMode.Core => -1,
             _ => _avgVoltageSensor?.Value ?? -1,
         };

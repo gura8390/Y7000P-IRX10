@@ -193,7 +193,7 @@
         </Style>
     </Window.Resources>
 
-    <Grid Background="{DynamicResource ApplicationPageBackgroundBrush}">
+    <Grid Background="{DynamicResource ApplicationBackgroundBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />

@@ -1,70 +1,47 @@
-name: Build
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+name: CSharp portable build and isolated regression tests
 
 on:
   workflow_dispatch:
   push:
-    branches: [ master ]
-    paths-ignore:
-      - '**.md'
-      - 'crowdin.yml'
-      - '.github/workflows/stale.yml'
-      - '.github/workflows/review.yml*'
+    branches: [main]
   pull_request:
-    branches: [ master, dev ]
-    paths-ignore:
-      - '**.md'
-      - 'crowdin.yml'
-      - '.github/workflows/stale.yml'
-      - '.github/workflows/review.yml*'
+    branches: [main]
+
+permissions:
+  contents: read
 
 concurrency:
-  group: build-${{ github.workflow }}-${{ github.ref }}
+  group: csharp-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
-
+  verify:
+    if: github.repository == 'gura8390/Y7000P-IRX10'
     runs-on: windows-2022
-
     steps:
-    - name: Checkout
-      uses: actions/checkout@v5
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v5
-      with:
-        dotnet-version: 9.0.x
-        cache: true
-        cache-dependency-path: '**/*.csproj'
-    - name: Restore
-      run: dotnet restore
-    - name: Restore identity package signing key
-      env:
-        LLT_CERT_PFX: ${{ secrets.LLT_CERT_PFX }}
-      run: |
-        if (-not $env:LLT_CERT_PFX) {
-          Write-Error "Missing LLT_CERT_PFX secret. The identity MSIX package cannot be signed."
-          exit 1
-        }
-
-        [IO.File]::WriteAllBytes("LenovoLegionToolkit.pfx", [Convert]::FromBase64String($env:LLT_CERT_PFX))
-      shell: powershell
-    - name: Build
-      env:
-        LLT_CERT_PASSWORD: ${{ secrets.LLT_CERT_PASSWORD }}
-      run: .\make_action.bat
-    - name: Verify installer
-      run: |
-        $installerPath = "build_installer\LenovoLegionToolkitSetup.exe"
-        if (-not (Test-Path $installerPath)) {
-          Write-Error "Installer file not found at $installerPath"
-          exit 1
-        }
-      shell: powershell
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: installer
-        path: build_installer\LenovoLegionToolkitSetup.exe
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+      - name: Build portable app without private debug paths
+        shell: pwsh
+        run: |
+          dotnet restore LenovoLegionToolkit.WPF/LenovoLegionToolkit.WPF.csproj --locked-mode
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          dotnet publish LenovoLegionToolkit.WPF/LenovoLegionToolkit.WPF.csproj -c Release -p:Platform=x64 -p:DebugType=None -p:DebugSymbols=false '-p:PathMap=${{ github.workspace }}=/_/src' --no-restore -o artifacts/app
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Isolated regressions
+        shell: pwsh
+        run: |
+          foreach ($project in @('Thermal.Tests','Regression.Tests','AutomationStartup.Tests','Firmware.Tests','ThermalLifecycle.Tests')) {
+            dotnet run --project "tests/$project/$project.csproj" -c Release -p:Platform=x64 -p:DebugType=None
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+      - name: Upload app artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: csharp-app
+          path: artifacts/app/
+          if-no-files-found: error

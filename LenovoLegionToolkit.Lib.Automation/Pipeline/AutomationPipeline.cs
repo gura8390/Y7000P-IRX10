@@ -14,6 +14,8 @@ namespace LenovoLegionToolkit.Lib.Automation.Pipeline;
 
 public class AutomationPipeline
 {
+    private const int MaxExpandedSteps = 10000;
+
     public Guid Id { get; init; } = Guid.NewGuid();
 
     public string? IconName { get; set; }
@@ -56,13 +58,15 @@ public class AutomationPipeline
             return;
         }
 
+        // Validate the entire graph before executing even the first hardware action.
+        var steps = GetAllSteps(otherPipelines);
         var context = new AutomationContext();
         var environment = new AutomationEnvironment();
         var stepExceptions = new List<Exception>();
 
         AllTriggers.ForEach(t => t.UpdateEnvironment(environment));
 
-        foreach (var step in GetAllSteps(otherPipelines))
+        foreach (var step in steps)
         {
             if (token.IsCancellationRequested)
             {
@@ -87,6 +91,7 @@ public class AutomationPipeline
                 Log.Instance.Trace($"Step run failed. [name={step.GetType().Name}]", ex);
 
                 stepExceptions.Add(ex);
+                continue;
             }
 
             Log.Instance.Trace($"Step completed successfully. [type={step.GetType().Name}]");
@@ -96,22 +101,49 @@ public class AutomationPipeline
             throw new AggregateException(stepExceptions);
     }
 
-    private IEnumerable<IAutomationStep> GetAllSteps(List<AutomationPipeline> pipelines)
+    private List<IAutomationStep> GetAllSteps(List<AutomationPipeline> pipelines)
     {
-        foreach (var step in Steps)
-        {
-            if (step is QuickActionAutomationStep qas)
-            {
-                var matchingPipeline = pipelines.FirstOrDefault(p => p.Id != Id && p.Id == qas.PipelineId && p.AllTriggers.IsEmpty());
-                if (matchingPipeline is null)
-                    continue;
+        var byId = new Dictionary<Guid, AutomationPipeline>();
+        foreach (var pipeline in pipelines)
+            byId.TryAdd(pipeline.Id, pipeline);
+        // AutomationProcessor supplies only other pipelines; root references still form a cycle.
+        byId[Id] = this;
 
-                foreach (var matchingPipelineStep in matchingPipeline.GetAllSteps(pipelines))
-                    yield return matchingPipelineStep;
+        var result = new List<IAutomationStep>();
+        var path = new HashSet<Guid> { Id };
+        var frames = new Stack<(AutomationPipeline Pipeline, int Index, QuickActionAutomationStep? Reference)>();
+        frames.Push((this, 0, null));
+        var visitedSteps = 0;
+
+        while (frames.TryPop(out var frame))
+        {
+            if (frame.Index >= frame.Pipeline.Steps.Count)
+            {
+                path.Remove(frame.Pipeline.Id);
+                if (frame.Reference is not null)
+                    result.Add(frame.Reference);
+                continue;
             }
 
-            yield return step;
+            if (++visitedSteps > MaxExpandedSteps)
+                throw new InvalidOperationException($"Quick action expansion exceeds {MaxExpandedSteps} steps.");
+
+            var step = frame.Pipeline.Steps[frame.Index];
+            frames.Push((frame.Pipeline, frame.Index + 1, frame.Reference));
+            if (step is not QuickActionAutomationStep qas)
+            {
+                result.Add(step);
+                continue;
+            }
+
+            if (qas.PipelineId is not Guid id || !byId.TryGetValue(id, out var matchingPipeline) || !matchingPipeline.AllTriggers.IsEmpty())
+                continue;
+            if (!path.Add(id))
+                throw new InvalidOperationException($"Quick action reference cycle at {id}.");
+            frames.Push((matchingPipeline, 0, qas));
         }
+
+        return result;
     }
 
     public AutomationPipeline DeepCopy() => new()
@@ -127,7 +159,15 @@ public class AutomationPipeline
 
     public IEnumerable<string> GetValidationWarnings(IEnumerable<AutomationPipeline>? pipelines = null)
     {
-        var steps = GetAllSteps(pipelines?.ToList() ?? []).ToList();
+        List<IAutomationStep> steps = [];
+        string? graphWarning = null;
+        try { steps = GetAllSteps(pipelines?.ToList() ?? []); }
+        catch (InvalidOperationException ex) { graphWarning = ex.Message; }
+        if (graphWarning is not null)
+        {
+            yield return graphWarning;
+            yield break;
+        }
 
         if (RunOnStartup)
         {

@@ -10,8 +10,10 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Threading.Channels;
 using LenovoLegionToolkit.Lib.Controllers.Sensors.Providers;
 using LenovoLegionToolkit.Lib.Features.Hybrid;
+using LenovoLegionToolkit.Lib.Thermal;
 using LenovoLegionToolkit.Lib.Settings;
 using LenovoLegionToolkit.Lib.System;
 using LenovoLegionToolkit.Lib.Utils;
@@ -19,7 +21,7 @@ using LibreHardwareMonitor.Hardware;
 
 namespace LenovoLegionToolkit.Lib.Controllers.Sensors;
 
-public class SensorsGroupController : IDisposable
+public class SensorsGroupController : IDisposable, IAsyncDisposable
 {
     #region Constants
 
@@ -146,21 +148,17 @@ public class SensorsGroupController : IDisposable
     private volatile bool _hardwareInitialized;
 
     private long _lastUpdateTick;
+    private HardwareUpdateScope _lastUpdateScope;
     private const int MIN_UPDATE_INTERVAL_MS = 100;
 
-    private readonly Dictionary<object, SensorSubscription> _subscribers = [];
+    private readonly SensorUpdateScheduler _subscribers = new();
     private CancellationTokenSource? _producerCts;
     private Task? _producerTask;
+    private readonly SemaphoreSlim _subscriptionChanged = new(0, 1);
     public event Action<HardwareSensorSnapshot>? SensorsUpdated;
 
     private readonly GPUController _gpuController = IoCContainer.Resolve<GPUController>();
     private readonly HybridModeFeature _hybridModeFeature = IoCContainer.Resolve<HybridModeFeature>();
-
-    private readonly struct SensorSubscription(TimeSpan interval, HardwareUpdateScope scope)
-    {
-        public TimeSpan Interval { get; } = interval;
-        public HardwareUpdateScope Scope { get; } = scope;
-    }
 
     private static readonly IDisposable NoOpDisposable = new LambdaDisposable(() => { });
 
@@ -183,8 +181,16 @@ public class SensorsGroupController : IDisposable
 
     private void OnSensorResetNeeded()
     {
-        Task.Run(ResetSensors);
+        if (Interlocked.CompareExchange(ref _resetScheduled, 1, 0) != 0) return;
+        _ = Task.Run(() =>
+        {
+            try { ResetSensors(); }
+            catch (Exception ex) { Log.Instance.Trace($"Sensor reset failed.", ex); }
+            finally { Volatile.Write(ref _resetScheduled, 0); }
+        });
     }
+
+    private int _resetScheduled;
 
     #region Subscription
 
@@ -216,19 +222,13 @@ public class SensorsGroupController : IDisposable
     }
 
     private HardwareUpdateScope ComputeScopeFromSensorItems(IEnumerable<SensorItem> items)
-    {
-        var set = items as HashSet<SensorItem> ?? new HashSet<SensorItem>(items);
-        return _allProviders
-            .Where(p => p.IsAvailable && set.Overlaps(p.ProvidedSensorItems))
-            .Select(p => p.Scope)
-            .Aggregate(HardwareUpdateScope.None, (a, b) => a | b);
-    }
+        => SensorSubscriptionScope.FromSensorItems(items, _allProviders);
 
     private HardwareUpdateScope ComputeScopeFromOsdItems(IEnumerable<OsdItem> items)
     {
         var set = items as HashSet<OsdItem> ?? new HashSet<OsdItem>(items);
         return _allProviders
-            .Where(p => p.IsAvailable && set.Overlaps(p.ProvidedOsdItems))
+            .Where(p => set.Overlaps(p.ProvidedOsdItems))
             .Select(p => p.Scope)
             .Aggregate(HardwareUpdateScope.None, (a, b) => a | b);
     }
@@ -288,6 +288,7 @@ public class SensorsGroupController : IDisposable
     {
         lock (_hardwareLock)
         {
+            if (_disposed) return;
             if (_hardwareInitialized)
             {
                 return;
@@ -321,6 +322,7 @@ public class SensorsGroupController : IDisposable
 
                 PopulateHardware(updateSensors: dgpuEjectInProgress);
                 DiscoverHardware();
+                _hardwareInitialized = true;
             }
             catch (Exception ex)
             {
@@ -330,7 +332,6 @@ public class SensorsGroupController : IDisposable
                 _hardware.Clear();
                 throw;
             }
-            finally { _hardwareInitialized = true; }
         }
     }
 
@@ -348,16 +349,20 @@ public class SensorsGroupController : IDisposable
 
     private async Task<LibreHardwareMonitorInitialState> InitializeAsync()
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
         if (_initialized) { InitialState = LibreHardwareMonitorInitialState.Initialized; return InitialState; }
         await _initSemaphore.WaitAsync().ConfigureAwait(false);
         try
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             if (_initialized) { InitialState = LibreHardwareMonitorInitialState.Initialized; return InitialState; }
             await Task.Run(GetHardware).ConfigureAwait(false);
-            _initialized = true;
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _initialized = _hardwareInitialized;
             InitialState = _hardware.Count == 0 ? LibreHardwareMonitorInitialState.Fail : LibreHardwareMonitorInitialState.Success;
             return InitialState;
         }
+        catch (ObjectDisposedException) when (_disposed) { throw; }
         catch (DllNotFoundException) { HandleInitException("DLL Not Found"); InitialState = LibreHardwareMonitorInitialState.PawnIONotInstalled; return InitialState; }
         catch (Exception ex) { HandleInitException(ex.Message); throw; }
         finally { _initSemaphore.Release(); }
@@ -377,7 +382,7 @@ public class SensorsGroupController : IDisposable
 
     public Task<string> GetCpuNameAsync()
     {
-        lock (_configLock)
+        lock (_hardwareLock)
         {
             if (_isResetting || !IsLibreHardwareMonitorInitialized() || !_cpuProvider.IsAvailable)
                 return Task.FromResult(UNKNOWN_NAME);
@@ -399,7 +404,7 @@ public class SensorsGroupController : IDisposable
 
     public Task<string> GetGpuNameAsync()
     {
-        lock (_configLock)
+        lock (_hardwareLock)
         {
             if (_isResetting || !IsLibreHardwareMonitorInitialized())
                 return Task.FromResult(UNKNOWN_NAME);
@@ -480,43 +485,106 @@ public class SensorsGroupController : IDisposable
 
     #region Update
 
-    private Task? _activeUpdateTask;
-    private readonly Lock _updateTaskLock = new();
+    private readonly SemaphoreSlim _updateGate = new(1, 1);
+    private readonly Channel<HardwareSensorSnapshot> _notifications = Channel.CreateBounded<HardwareSensorSnapshot>(
+        new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true });
+    private Task? _notificationTask;
+    private volatile bool _disposed;
+    private readonly ThermalPolicy _thermalPolicy = new();
+    public ThermalDecision? LastThermalDecision { get; private set; }
+    private bool _thermalShadowEnabled;
+    private readonly object _thermalShadowOwner = new();
+    public bool ThermalShadowEnabled
+    {
+        get => Volatile.Read(ref _thermalShadowEnabled);
+        set
+        {
+            lock (_subscribers)
+            {
+                if (_disposed || _thermalShadowEnabled == value) return;
+                if (value) Start(_thermalShadowOwner, TimeSpan.FromMilliseconds(500), HardwareUpdateScope.Cpu);
+                else Stop(_thermalShadowOwner);
+                Volatile.Write(ref _thermalShadowEnabled, value);
+                if (!value) LastThermalDecision = null;
+            }
+        }
+    }
+
+    public (TemperatureReading Package, TemperatureReading CoreMax) GetControlTemperatures()
+    {
+        var temperatures = Volatile.Read(ref _controlTemperatures);
+        return (temperatures.Package, temperatures.CoreMax);
+    }
+
+    private sealed record ControlTemperatures(TemperatureReading Package, TemperatureReading CoreMax);
+    private ControlTemperatures _controlTemperatures = new(new(double.NaN, 0), new(double.NaN, 0));
+    private Task? _thermalTask;
+
+    private void CaptureControlTemperatures(long tick)
+    {
+        var available = _cpuProvider.IsAvailable;
+        Volatile.Write(ref _controlTemperatures, new(
+            new TemperatureReading(available ? _cpuProvider.PackageTemperature ?? double.NaN : double.NaN, tick),
+            new TemperatureReading(available ? _cpuProvider.CoreMaxTemperature ?? double.NaN : double.NaN, tick)));
+    }
+
+    private async Task RunThermalShadowAsync(CancellationToken token)
+    {
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                if (ThermalShadowEnabled)
+                {
+                    var input = Volatile.Read(ref _controlTemperatures);
+                    var next = _thermalPolicy.Evaluate(input.Package, input.CoreMax, Environment.TickCount64, LastThermalDecision);
+                    if (LastThermalDecision?.Phase != next.Phase || LastThermalDecision?.PowerFraction != next.PowerFraction)
+                        Log.Instance.Trace($"Thermal shadow: {next.Phase}, ceiling fraction={next.PowerFraction:F2}. {next.Reason}");
+                    LastThermalDecision = next;
+                }
+                await Task.Delay(500, token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+    }
 
     public async Task UpdateAsync(bool force = false, HardwareUpdateScope scope = HardwareUpdateScope.All)
     {
-        if (_isResetting || !IsLibreHardwareMonitorInitialized()) return;
-
-        var now = Environment.TickCount64;
-        if (!force && now - _lastUpdateTick < MIN_UPDATE_INTERVAL_MS) return;
-
-        Task? updateTask;
-        lock (_updateTaskLock)
+        await _updateGate.WaitAsync().ConfigureAwait(false);
+        try
         {
-            if (_activeUpdateTask == null)
-            {
-                _activeUpdateTask = PerformUpdateInternal(scope);
-            }
-            updateTask = _activeUpdateTask;
+            if (_disposed || _isResetting || !IsLibreHardwareMonitorInitialized()) return;
+            // Each caller's requested scope is sampled; a CPU-only operation cannot satisfy an All request.
+            if (!force && SensorUpdateScheduler.Covers(_lastUpdateScope, scope) && Environment.TickCount64 - _lastUpdateTick < MIN_UPDATE_INTERVAL_MS) return;
+            lock (_subscribers) _notificationTask ??= Task.Run(PublishNotificationsAsync);
+            await PerformUpdateInternal(scope).ConfigureAwait(false);
         }
+        finally { _updateGate.Release(); }
+    }
 
-        if (updateTask != null)
-            await updateTask.ConfigureAwait(false);
+    private async Task PublishNotificationsAsync()
+    {
+        await foreach (var snapshot in _notifications.Reader.ReadAllAsync().ConfigureAwait(false))
+        {
+            var handlers = SensorsUpdated;
+            if (handlers is null) continue;
+            foreach (Action<HardwareSensorSnapshot> handler in handlers.GetInvocationList())
+            {
+                try { handler(snapshot); }
+                catch (Exception ex) { Log.Instance.Trace($"Sensor subscriber failed.", ex); }
+            }
+        }
     }
 
     private async Task PerformUpdateInternal(HardwareUpdateScope scope)
     {
-        try
-        {
-            var now = Environment.TickCount64;
-            _lastUpdateTick = now;
-
             if (scope == HardwareUpdateScope.None)
                 return;
 
-            var gpuState = await _gpuController.GetLastKnownStateAsync().ConfigureAwait(false);
-            var dgpuEjectInProgress = IsDgpuEjectInProgress();
-            bool gpuInactive = IsGpuInActive(gpuState) || dgpuEjectInProgress;
+            var needsGpu = Includes(scope, HardwareUpdateScope.Gpu);
+            var dgpuEjectInProgress = needsGpu && IsDgpuEjectInProgress();
+            var gpuInactive = needsGpu && (dgpuEjectInProgress ||
+                IsGpuInActive(await _gpuController.GetLastKnownStateAsync().ConfigureAwait(false)));
 
             await Task.Run(() =>
             {
@@ -525,6 +593,8 @@ public class SensorsGroupController : IDisposable
                     if (_isResetting || _computer == null || !_hardwareInitialized) return;
                     try
                     {
+                        var sampleStarted = Environment.TickCount64;
+                        bool cpuSampled = false;
                         var brokenHardware = new List<IHardware>();
                         foreach (var h in _hardware)
                         {
@@ -532,7 +602,14 @@ public class SensorsGroupController : IDisposable
                             if (!ShouldUpdateHardware(h, scope, gpuInactive)) continue;
                             try
                             {
+                                var hardwareStarted = Environment.TickCount64;
                                 h.Update();
+                                if (h.HardwareType == HardwareType.Cpu && _cpuProvider.IsAvailable)
+                                {
+                                    _cpuProvider.Read();
+                                    CaptureControlTemperatures(hardwareStarted);
+                                    cpuSampled = true;
+                                }
                             }
                             catch (Exception ex)
                             {
@@ -541,20 +618,25 @@ public class SensorsGroupController : IDisposable
                             }
                         }
 
+                        var affectedProviders = new HashSet<ISensorProvider>();
                         foreach (var h in brokenHardware)
                         {
                             _hardware.Remove(h);
+                            foreach (var provider in _allProviders.Where(p => ShouldUpdateHardware(h, p.Scope, false)))
+                                affectedProviders.Add(provider);
                         }
+                        // A failed iGPU/disk must not discard other healthy devices in its domain.
+                        foreach (var provider in affectedProviders) provider.Discover(_hardware);
 
-                        if (!dgpuEjectInProgress && _dgpuHardwareSkipped)
+                        if (needsGpu && !dgpuEjectInProgress && _dgpuHardwareSkipped)
                         {
                             DiscoverHardware();
                             _dgpuHardwareSkipped = false;
                         }
 
                         // Read from providers — each populates provider.Values
-                        if (_cpuProvider.IsAvailable && Includes(scope, HardwareUpdateScope.Cpu))
-                            _cpuProvider.Read();
+                        if (!cpuSampled && Includes(scope, HardwareUpdateScope.Cpu))
+                            Volatile.Write(ref _controlTemperatures, new(new(double.NaN, sampleStarted), new(double.NaN, sampleStarted)));
 
                         IReadOnlyDictionary<SensorItem, float> gpuValues = new Dictionary<SensorItem, float>();
 
@@ -587,38 +669,50 @@ public class SensorsGroupController : IDisposable
                             _storageProvider.Read();
 
                         // Merge all provider values into a single snapshot
-                        var snap = new HardwareSensorSnapshot();
-                        snap = snap.WithValues(_cpuProvider.Values);
-                        snap = snap.WithValues(gpuValues);
-                        snap = snap.WithValues(_memoryProvider.Values);
-                        snap = snap.WithValues(_storageProvider.Values);
-                        Snapshot = snap;
+                        var samples = new Dictionary<SensorItem, float>();
+                        foreach (var provider in _allProviders.Where(p => Includes(scope, p.Scope)))
+                        {
+                            IReadOnlyDictionary<SensorItem, float> values = provider switch
+                            {
+                                CpuSensorProvider cpu => cpu.Values,
+                                MemorySensorProvider memory => memory.Values,
+                                StorageSensorProvider storage => storage.Values,
+                                _ => gpuValues
+                            };
+                            foreach (var item in provider.ProvidedSensorItems)
+                                samples[item] = provider.IsAvailable ? values.GetValueOrDefault(item, -1) : -1;
+                        }
+                        // A later slow GPU/storage operation must not rejuvenate an old CPU reading.
+                        // Fans-only subscriptions are firmware/battery refresh heartbeats.
+                        // They must neither allocate a hardware copy nor refresh its timestamps.
+                        if (samples.Count != 0) Snapshot = Snapshot.WithSamples(samples, sampleStarted);
+                        _lastUpdateScope = scope;
+                        _lastUpdateTick = sampleStarted;
 
-                        SensorsUpdated?.Invoke(Snapshot);
+                        _notifications.Writer.TryWrite(Snapshot);
                     }
                     catch (Exception ex)
                     {
-                        if (ex is IndexOutOfRangeException) Task.Run(ResetSensors);
+                        Log.Instance.Trace($"Sensor update failed.", ex);
+                        if (ex is IndexOutOfRangeException) OnSensorResetNeeded();
                     }
                 }
             }).ConfigureAwait(false);
-        }
-        finally
-        {
-            lock (_updateTaskLock)
-            {
-                _activeUpdateTask = null;
-            }
-        }
     }
 
     private void ResetSensors()
     {
-        _isResetting = true;
-        try
+        lock (_hardwareLock)
         {
-            lock (_hardwareLock)
+            if (_disposed) return;
+            _isResetting = true;
+            try
             {
+                Snapshot = new HardwareSensorSnapshot();
+                _lastUpdateScope = HardwareUpdateScope.None;
+                Volatile.Write(ref _controlTemperatures, new(new(double.NaN, 0), new(double.NaN, 0)));
+                foreach (var provider in _allProviders) provider.Reset();
+                _cachedCpuName = _cachedGpuName = string.Empty;
                 _computer?.Close(); _hardware.Clear();
                 _computer?.Open();
                 _computer?.Reset();
@@ -636,8 +730,8 @@ public class SensorsGroupController : IDisposable
                 PopulateHardware(updateSensors: dgpuEjectInProgress);
                 DiscoverHardware();
             }
+            finally { _isResetting = false; }
         }
-        finally { _isResetting = false; }
     }
 
     #endregion
@@ -675,7 +769,8 @@ public class SensorsGroupController : IDisposable
     {
         lock (_subscribers)
         {
-            _subscribers[subscriber] = new SensorSubscription(interval, scope);
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _subscribers.Set(subscriber, interval, scope, Environment.TickCount64);
             UpdateProducerLoop();
         }
     }
@@ -693,51 +788,46 @@ public class SensorsGroupController : IDisposable
 
     private void UpdateProducerLoop()
     {
-        if (_subscribers.Count == 0)
-        {
-            StopProducerLoop();
-            return;
-        }
-
-        StopProducerLoop();
-
+        // One producer for the lifetime of this controller. Subscription changes do not restart I/O.
+        if (_disposed) return;
+        if (_subscriptionChanged.CurrentCount == 0) _subscriptionChanged.Release();
+        if (_producerTask is not null) return;
         _producerCts = new CancellationTokenSource();
+        _notificationTask ??= Task.Run(PublishNotificationsAsync);
         var token = _producerCts.Token;
-        _producerTask = Task.Run(() => ProducerLoop(token), token);
-    }
-
-    private void StopProducerLoop()
-    {
-        _producerCts?.Cancel();
-        _producerCts?.Dispose();
-        _producerCts = null;
-        _producerTask = null;
+        _producerTask = Task.Run(() => ProducerLoop(token));
+        _thermalTask = Task.Run(() => RunThermalShadowAsync(token));
     }
 
     private async Task ProducerLoop(CancellationToken token)
     {
         while (!token.IsCancellationRequested)
         {
-            TimeSpan minInterval;
             HardwareUpdateScope scope;
             lock (_subscribers)
             {
-                if (_subscribers.Count == 0) return;
-                minInterval = _subscribers.Values.Min(s => s.Interval);
-                scope = _subscribers.Values.Aggregate(HardwareUpdateScope.None, (current, s) => current | s.Scope);
+                scope = IsLibreHardwareMonitorInitialized() ? _subscribers.TakeDue(Environment.TickCount64) : HardwareUpdateScope.None;
             }
 
             try
             {
+                if (scope == HardwareUpdateScope.None)
+                {
+                    TimeSpan delay;
+                    lock (_subscribers) delay = _subscribers.Count == 0 ? Timeout.InfiniteTimeSpan
+                        : IsLibreHardwareMonitorInitialized() ? _subscribers.NextDelay(Environment.TickCount64) : TimeSpan.FromMilliseconds(500);
+                    await _subscriptionChanged.WaitAsync(delay, token).ConfigureAwait(false);
+                    continue;
+                }
                 if (!IsLibreHardwareMonitorInitialized())
                 {
-                    await Task.Delay(50, token).ConfigureAwait(false);
+                    await _subscriptionChanged.WaitAsync(TimeSpan.FromMilliseconds(500), token).ConfigureAwait(false);
                     continue;
                 }
 
                 await UpdateAsync(true, scope).ConfigureAwait(false);
 
-                await Task.Delay(minInterval, token).ConfigureAwait(false);
+                // Re-evaluate deadlines after I/O; do not add the sampling duration to the period.
             }
             catch (OperationCanceledException)
             {
@@ -746,7 +836,8 @@ public class SensorsGroupController : IDisposable
             catch (Exception ex)
             {
                 Log.Instance.Trace($"ProducerLoop error: {ex}");
-                await Task.Delay(1000, token).ConfigureAwait(false);
+                try { await Task.Delay(1000, token).ConfigureAwait(false); }
+                catch (OperationCanceledException) { break; }
             }
         }
     }
@@ -774,12 +865,55 @@ public class SensorsGroupController : IDisposable
 
     #endregion
 
+    private Task? _shutdownTask;
+
     public void Dispose()
     {
-        StopProducerLoop();
-        _cpuProvider.SensorResetNeeded -= OnSensorResetNeeded;
-        lock (_hardwareLock) { _computer?.Close(); _computer = null; _hardwareInitialized = false; }
-        _initSemaphore.Dispose();
+        var task = DisposeAsync().AsTask();
+        try
+        {
+            if (!task.Wait(TimeSpan.FromSeconds(2)))
+                Log.Instance.Trace($"Sensor shutdown is waiting for a pending hardware operation; cleanup retains hardware ownership.");
+        }
+        catch (Exception ex) { Log.Instance.Trace($"Sensor shutdown failed.", ex); }
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        lock (_subscribers)
+        {
+            if (_shutdownTask is not null) return new ValueTask(_shutdownTask);
+            _disposed = true;
+            _subscribers.Clear();
+            _producerCts?.Cancel();
+            _notifications.Writer.TryComplete();
+            _shutdownTask = Task.Run(FinishShutdownAsync);
+            return new ValueTask(_shutdownTask);
+        }
+    }
+
+    private async Task FinishShutdownAsync()
+    {
+        if (_thermalTask is not null) await _thermalTask.ConfigureAwait(false);
+        if (_producerTask is not null) await _producerTask.ConfigureAwait(false);
+        await _initSemaphore.WaitAsync().ConfigureAwait(false);
+        await _updateGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            _cpuProvider.SensorResetNeeded -= OnSensorResetNeeded;
+            lock (_hardwareLock)
+            {
+                _computer?.Close(); _computer = null; _hardwareInitialized = false; _initialized = false;
+                _hardware.Clear();
+                foreach (var provider in _allProviders) provider.Reset();
+                Snapshot = new HardwareSensorSnapshot();
+                InitialState = LibreHardwareMonitorInitialState.Fail;
+                Volatile.Write(ref _controlTemperatures, new(new(double.NaN, 0), new(double.NaN, 0)));
+            }
+        }
+        finally { _updateGate.Release(); _initSemaphore.Release(); }
+        // Subscribers may dispatch to the UI; never synchronously join their dispatcher here.
+        _producerCts?.Dispose();
         GC.SuppressFinalize(this);
     }
 }

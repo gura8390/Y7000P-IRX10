@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <SupportedOSPlatformVersion />
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Management" Version="8.0.0" />
+    <Compile Include="../../LenovoLegionToolkit.Lib/Controllers/ThermalCpuTransport.cs" Link="Core/ThermalCpuTransport.cs" />
+    <Compile Include="../../LenovoLegionToolkit.Lib/Controllers/CpuThermalWriteCoordinator.cs" Link="Core/CpuThermalWriteCoordinator.cs" />
+    <Compile Include="../../LenovoLegionToolkit.Lib/System/Management/WMI.LenovoOtherMethod.cs" Link="Core/WMI.LenovoOtherMethod.cs" />
+    <Compile Include="../../LenovoLegionToolkit.Lib/System/Management/WMI.LenovoCpuMethod.cs" Link="Core/WMI.LenovoCpuMethod.cs" />
+    <Compile Include="../../LenovoLegionToolkit.Lib/Thermal/PowerConstraintArbiter.cs" Link="Core/PowerConstraintArbiter.cs" />
+    <Compile Include="../../LenovoLegionToolkit.Lib/Thermal/HardwareCommandExecutor.cs" Link="Core/HardwareCommandExecutor.cs" />
+    <Compile Include="../../LenovoLegionToolkit.Lib/Thermal/ThermalPolicy.cs" Link="Core/ThermalPolicy.cs" />
+  </ItemGroup>
+</Project>

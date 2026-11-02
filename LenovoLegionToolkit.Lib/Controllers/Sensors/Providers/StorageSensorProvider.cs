@@ -28,7 +28,7 @@ public class StorageSensorProvider : ISensorProvider
 
     public void Discover(IReadOnlyList<IHardware> hardware)
     {
-        _sensors.Clear();
+        Reset();
 
         foreach (var storage in hardware.Where(h => h.HardwareType == HardwareType.Storage))
         {

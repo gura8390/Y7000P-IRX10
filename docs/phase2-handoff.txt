@@ -1,0 +1,42 @@
+Y7000P IRX10 / C# 2.34.0.3 公开交接
+
+来源：LenovoLegionToolkit-Team/LenovoLegionToolkit，基线提交
+0bb045be29c4fd772ba9887a3507b6a9b0b56d58。保留GPL-3.0与上游版权。
+此公开副本不含本地用户名、个人目录、进程ID、用户settings/args、设备序列号、
+MAC、原程序备份或现场日志。
+
+目标：LENOVO83NN / Y7000P IRX10 / i9-14900HX / BIOS S9CN15WW。
+已知固件网格PL1 50–135W、PL2 60–195W，步长1。运行时仍必须读取并验证
+当前能力和预算；能力和读回不能冒充实测功耗或普适兼容保证。
+
+CPU热策略默认关闭，85°C预控、88°C目标；温度源明确区分package/core热点
+和Lenovo固件聚合，不把后者伪造为两种独立测量。缺失/过期请求最低合法
+功耗；恢复缓慢且不高于用户预算。采样/监督独立于UI/GPU/硬盘周期。
+
+物理命令single-flight包括写入与读回；超时不等于物理完成，不释放在途所有权。
+仅恢复仍属于本控制器的值；外部改动不强行覆盖，恢复失败锁存。
+先停止温控并确认恢复，再修改CPU预算，重新启用读取新基线。
+
+入口：设置→应用行为→向下滚动到“硬件传感器”→点击整行文字。
+右侧切换按钮只开关硬件传感器，不打开设置窗口。
+
+配置：同进程同规范路径共锁，完整pending写入/flush后commit，保留previous。
+坏配置备份是实际读取的损坏原文，命名不因同秒重复覆盖。未知JSON字段、
+不同大小写未知键和精确numeric lexeme保留；已知null/数组/字典删除不复活。
+未知$type/$ref保留为数据，不据此实例化类型。
+
+自动化：可达quick-action图执行前校验；启动按批次逐代等待，累计128事件预算。
+后代失败向启动调用者传播，失败不放行温控；closed context迟到事件忽略。
+独立runtime事件维持日志与后续规则语义。
+
+修复主题资源：AMD用ApplicationBackgroundBrush；LampArray用
+SystemAccentColorPrimaryBrush / SystemAccentColorSecondaryBrush。
+
+冻结软件门禁：Regression470、Startup13、Thermal5319、Firmware67+345、
+Lifecycle619、离屏WPF765（Dark/Light各80资源键）。包含模型、重复断言和
+替身，不是可见GUI/鼠标/实机硬件验收。公开路径映射构建复验见public-validation.md。
+
+软件阶段已交付；温度和满载验收由使用者自行负责。公共发布不进行切模式、
+CPU负载、GPU/HID或固件写入；不声称温度达标、永不超过90°C、整机提速
+或长期稳定已经证明。原子保存不承诺跨进程/previous并发/两文件事务；
+checkpoint是异常注入，不是断电、磁盘满或进程中断测试。

@@ -63,6 +63,19 @@
                     Text="{x:Static resources:Resource.SettingsPage_SensorSettings_Title}" />
                 <custom:CardControl Margin="0,0,0,8">
                     <custom:CardControl.Header>
+                        <controls:CardHeaderControl Title="{x:Static resources:Resource.ThermalShadowTitle}" Subtitle="{x:Static resources:Resource.ThermalShadowDescription}" />
+                    </custom:CardControl.Header>
+                    <CheckBox x:Name="_thermalShadowCheckBox" />
+                </custom:CardControl>
+                <custom:CardControl Margin="0,0,0,8">
+                    <custom:CardControl.Header>
+                        <controls:CardHeaderControl Title="本机 CPU 90°C 温控" Subtitle="性能优先；85°C 预控，固件上限 88°C。需自定义模式，自动选择可用温度来源。" />
+                    </custom:CardControl.Header>
+                    <CheckBox x:Name="_cpuThermalCheckBox" />
+                </custom:CardControl>
+                <TextBlock x:Name="_cpuThermalStatus" Margin="0,0,0,12" TextWrapping="Wrap" />
+                <custom:CardControl Margin="0,0,0,8">
+                    <custom:CardControl.Header>
                         <controls:CardHeaderControl Title="{x:Static resources:Resource.SensorSettingsPage_CPU_Frequency_Title}" Subtitle="{x:Static resources:Resource.SensorSettingsPage_CPU_Frequency_Message}" />
                     </custom:CardControl.Header>
                     <ComboBox x:Name="_cpuFrequencySelector" MinWidth="140">

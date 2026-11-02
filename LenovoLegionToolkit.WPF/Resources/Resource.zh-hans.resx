@@ -3864,4 +3864,6 @@
   <data name="Yes" xml:space="preserve">
     <value>是</value>
   </data>
+  <data name="ThermalShadowTitle" xml:space="preserve"><value>CPU 90°C 控温观察</value></data>
+  <data name="ThermalShadowDescription" xml:space="preserve"><value>仅观察决策，不调节功耗或风扇。需要启用硬件传感器并重启应用；开启日志后可查看决策。</value></data>
 </root>

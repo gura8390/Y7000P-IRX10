@@ -6,15 +6,12 @@ public class PowerMonitor
 {
     private const float MAX_VALID = 400f;
     private const float MIN_VALID = 0f;
-    private const int MAX_STUCK_RETRIES = 10;
-
-    private float _cached;
-    private int _stuckCount;
 
     public event Action? ResetNeeded;
 
     public float Read(float raw)
     {
+        if (!float.IsFinite(raw)) return -1;
         if (raw > MAX_VALID)
         {
             ResetNeeded?.Invoke();
@@ -26,24 +23,13 @@ public class PowerMonitor
             return -1;
         }
 
-        if (Math.Abs(raw - _cached) < float.Epsilon)
-        {
-            if (++_stuckCount >= MAX_STUCK_RETRIES)
-            {
-                ResetNeeded?.Invoke();
-                return -1;
-            }
-            return raw;
-        }
-
-        _cached = raw;
-        _stuckCount = 0;
+        // A stable power limit can legitimately produce identical readings indefinitely.
+        // Equality alone is not evidence that the sensor or its driver is stuck.
         return raw;
     }
 
     public void Reset()
     {
-        _cached = 0;
-        _stuckCount = 0;
+        // No cached equality-based state: freshness belongs to the sampling controller.
     }
 }

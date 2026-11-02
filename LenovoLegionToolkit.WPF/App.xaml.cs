@@ -79,6 +79,7 @@ public partial class App
     private Mutex? _singleInstanceMutex;
     private EventWaitHandle? _singleInstanceWaitHandle;
     private bool _showPawnIONotify;
+    private bool _automationProcessorInitialized;
 
     private readonly List<Task> _deferredInitTasks = [];
 
@@ -86,6 +87,7 @@ public partial class App
     public static MainWindow? MainWindowInstance;
 
     public static bool IsRestoringSettings { get; set; }
+    public static bool IsInitializing { get; private set; } = true;
 
     #endregion
 
@@ -106,6 +108,21 @@ public partial class App
             var deferredInitTask = StartBackgroundServicesAsync();
             await InitializeUIAsync();
             await deferredInitTask;
+            // Take the thermal baseline only after preset restoration, AI and
+            // explicitly awaited startup actions have finished their CPU writes.
+            var startupActionsSucceeded = _automationProcessorInitialized
+                && await SafeInitAsync(InitStartupAutomationAsync, "Startup Actions");
+            if (IoCContainer.Resolve<ApplicationSettings>().Store.EnableCpuThermalControl)
+            {
+                if (startupActionsSucceeded)
+                    await SafeInitAsync(InitCpuThermalControlAsync, "CPU Thermal Control");
+                else
+                {
+                    Log.Instance.Trace($"CPU thermal autostart skipped because startup actions did not complete successfully.");
+                    _ = Dispatcher.BeginInvoke(() => MessageBox.Show("启动操作未全部完成，CPU 温控未自动启用。请检查日志并修正启动操作后，再重新启用温控。", "CPU 温控", MessageBoxButton.OK, MessageBoxImage.Error));
+                }
+            }
+            IsInitializing = false;
 
             await Dispatcher.InvokeAsync(() =>
             {
@@ -126,7 +143,7 @@ public partial class App
         }
         catch (Exception ex)
         {
-            if (AppFlags.Instance?.Debug == true)
+            if (AppFlags.IsInitialized && AppFlags.Instance.Debug)
             {
                 Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine(@$"CRITICAL EXCEPTION: {ex}");
@@ -366,7 +383,7 @@ public partial class App
     {
         var errorMsg = $"CRITICAL STARTUP ERROR:\n{ex}";
 
-        if (AppFlags.Instance is { Debug: true })
+        if (AppFlags.IsInitialized && AppFlags.Instance.Debug)
         {
             Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine(@$"\n{new string('=', 30)}\n{errorMsg}\n{new string('=', 30)}");
@@ -392,11 +409,22 @@ public partial class App
 
     private void Application_Exit(object sender, ExitEventArgs e)
     {
+        if (!IoCContainer.IsInitialized) { _singleInstanceMutex?.Close(); return; }
+        // A stalled vendor call must not deadlock the UI exit path. A pending restoration keeps
+        // physical ownership; the verified firmware limit remains in place if exit wins the race.
+        var thermal = IoCContainer.TryResolve<CpuThermalController>();
+        if (thermal is not null)
+        {
+            try { if (!thermal.StopAsync().Wait(TimeSpan.FromSeconds(2))) Log.Instance.Trace($"CPU thermal restoration is still pending at process exit."); }
+            catch (Exception ex) { Log.Instance.Trace($"CPU thermal restoration was not confirmed at exit.", ex); }
+        }
+        IoCContainer.TryResolve<SensorsGroupController>()?.Dispose();
         _singleInstanceMutex?.Close();
     }
 
     public async Task ShutdownAsync()
     {
+        await SafeExecuteAsync<CpuThermalController>(c => c.StopAsync().WaitAsync(TimeSpan.FromSeconds(2)));
         await SafeExecuteAsync<AIController>(c => c.StopAsync());
 
         await SafeExecuteAsync<RGBKeyboardBacklightController>(async c =>
@@ -789,13 +817,14 @@ public partial class App
         }
     }
 
-    private static async Task<bool> InitAutomationProcessorAsync()
+    private async Task<bool> InitAutomationProcessorAsync()
     {
+        _automationProcessorInitialized = false;
         try
         {
             var ap = IoCContainer.Resolve<AutomationProcessor>();
             await ap.InitializeAsync();
-            ap.RunOnStartup();
+            _automationProcessorInitialized = true;
             return true;
         }
         catch (Exception ex)
@@ -803,6 +832,12 @@ public partial class App
             Log.Instance.Trace($"Couldn't initialize automation processor.", ex);
             return false;
         }
+    }
+
+    private static async Task<bool> InitStartupAutomationAsync()
+    {
+        await IoCContainer.Resolve<AutomationProcessor>().RunOnStartupAsync().ConfigureAwait(false);
+        return true;
     }
 
     private static async Task<bool> InitAutomationLocalization()
@@ -875,8 +910,29 @@ public partial class App
 
     private static async Task<bool> InitSensorsHardwareAsync()
     {
-        await IoCContainer.Resolve<SensorsGroupController>().IsSupportedAsync().ConfigureAwait(false);
-        return true;
+        var sensors = IoCContainer.Resolve<SensorsGroupController>();
+        var supported = await sensors.IsSupportedAsync().ConfigureAwait(false);
+        if (sensors.IsLibreHardwareMonitorInitialized() && IoCContainer.Resolve<ApplicationSettings>().Store.EnableThermalShadow)
+        {
+            sensors.ThermalShadowEnabled = true;
+        }
+        return sensors.IsLibreHardwareMonitorInitialized();
+    }
+
+    private static async Task<bool> InitCpuThermalControlAsync()
+    {
+        try
+        {
+            using var startupCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await IoCContainer.Resolve<CpuThermalController>().StartAsync(startupCancellation.Token).WaitAsync(startupCancellation.Token).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Instance.Trace($"Active CPU thermal control failed to start.", ex);
+            _ = Current.Dispatcher.BeginInvoke(() => MessageBox.Show($"CPU 温控启动未确认：{ex.Message}", "CPU 温控", MessageBoxButton.OK, MessageBoxImage.Error));
+            return false;
+        }
     }
 
     private static async Task<bool> InitSensorsControllerAsync()
@@ -1105,19 +1161,22 @@ public partial class App
         }
     }
 
-    private async Task SafeInitAsync(Func<Task<bool>> action, string taskName)
+    private async Task<bool> SafeInitAsync(Func<Task<bool>> action, string taskName)
     {
         try
         {
             var sw = Stopwatch.StartNew();
-            if (await action())
+            var succeeded = await action();
+            if (succeeded)
             {
                 Log.Instance.Trace($"{taskName} initialized successfully. [elapsed={sw.ElapsedMilliseconds}ms]");
             }
+            return succeeded;
         }
         catch (Exception ex)
         {
-            Log.Instance.Trace($"{taskName} failed: {ex.Message}");
+            Log.Instance.Trace($"{taskName} failed: {ex.Message}", ex);
+            return false;
         }
     }
 

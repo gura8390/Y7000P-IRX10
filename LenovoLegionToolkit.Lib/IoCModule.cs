@@ -144,6 +144,7 @@ public class IoCModule : Module
         builder.Register<MemorySensorProvider>(true);
         builder.Register<StorageSensorProvider>(true);
         builder.Register<SensorsGroupController>(true);
+        builder.Register<CpuThermalController>(true);
         builder.Register<SmartFnLockController>();
         builder.Register<SpectrumKeyboardBacklightController>();
         builder.Register<PowerButtonLedController>();

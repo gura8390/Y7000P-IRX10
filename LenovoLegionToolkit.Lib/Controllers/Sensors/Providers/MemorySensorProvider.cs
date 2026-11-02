@@ -35,10 +35,7 @@ public class MemorySensorProvider : ISensorProvider
 
     public void Discover(IReadOnlyList<IHardware> hardware)
     {
-        _loadSensor = null; _usedSensor = null; _availableSensor = null;
-        _tempSensors.Clear();
-        _cachedTotal = -1;
-        IsAvailable = false;
+        Reset();
 
         var mem = hardware.FirstOrDefault(h => h is { HardwareType: HardwareType.Memory, Name: MEM_TOTAL });
         if (mem?.Sensors == null) return;
@@ -72,8 +69,14 @@ public class MemorySensorProvider : ISensorProvider
 
         float usage = _loadSensor?.Value ?? -1;
         float used = _usedSensor?.Value ?? -1;
-        float total = (_usedSensor?.Value ?? 0) + (_availableSensor?.Value ?? 0);
-        if (total <= 0) total = -1;
+        float available = _availableSensor?.Value ?? -1;
+        if (!float.IsFinite(usage) || usage < 0 || usage > 100) usage = -1;
+        if (!float.IsFinite(used) || used < 0) used = -1;
+        float total = used >= 0 && float.IsFinite(available) && available >= 0 ? used + available : -1;
+        if (float.IsFinite(total) && total > 0)
+            _cachedTotal = total;
+        else
+            total = _cachedTotal;
 
         if (used >= 0 && total > 0)
         {

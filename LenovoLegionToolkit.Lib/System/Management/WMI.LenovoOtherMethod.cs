@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Threading.Tasks;
+using LenovoLegionToolkit.Lib.Controllers;
 
 // ReSharper disable IdentifierTypo
 // ReSharper disable InconsistentNaming
@@ -68,14 +69,7 @@ public static partial class WMI
             new() { { "IDs", (int)id } },
             pdc => Convert.ToInt32(pdc["Value"].Value));
 
-        public static Task SetFeatureValueAsync(CapabilityID id, int value) => CallAsync("root\\WMI",
-            $"SELECT * FROM LENOVO_OTHER_METHOD",
-            "SetFeatureValue",
-            new()
-            {
-                { "IDs", (int)id },
-                { "value", value }
-            });
+        public static Task SetFeatureValueAsync(CapabilityID id, int value) => SetFeatureValueAsync((uint)id, value);
 
         public static Task<int> GetFeatureValueAsync(uint idRaw) => CallAsync("root\\WMI",
             $"SELECT * FROM LENOVO_OTHER_METHOD",
@@ -83,7 +77,10 @@ public static partial class WMI
             new() { { "IDs", idRaw } },
             pdc => Convert.ToInt32(pdc["Value"].Value));
 
-        public static Task SetFeatureValueAsync(uint idRaw, int value) => CallAsync("root\\WMI",
+        public static Task SetFeatureValueAsync(uint idRaw, int value) =>
+            CpuThermalWriteCoordinator.WriteAsync(idRaw, value, SetFeatureValueUncoordinatedAsync, GetFeatureValueAsync);
+
+        internal static Task SetFeatureValueUncoordinatedAsync(uint idRaw, int value) => CallAsync("root\\WMI",
             $"SELECT * FROM LENOVO_OTHER_METHOD",
             "SetFeatureValue",
             new()

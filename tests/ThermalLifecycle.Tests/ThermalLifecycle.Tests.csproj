@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <SupportedOSPlatformVersion />
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../LenovoLegionToolkit.Lib/Controllers/CpuThermalController.cs" Link="Core/CpuThermalController.cs" />
+    <Compile Include="../../LenovoLegionToolkit.Lib/Thermal/*.cs" Link="Core/%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

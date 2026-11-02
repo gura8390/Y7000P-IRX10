@@ -9,6 +9,8 @@ public static class IoCContainer
 
     private static IContainer? _container;
 
+    public static bool IsInitialized { get { lock (Lock) return _container is not null; } }
+
     public static void Initialize(params Module[] modules)
     {
         lock (Lock)

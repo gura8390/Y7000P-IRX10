@@ -3925,4 +3925,6 @@ Logging will be enabled automatically, if you choose to continue.</value>
   <data name="PowerButtonLed_Title" xml:space="preserve">
     <value>Power Button Light</value>
   </data>
+  <data name="ThermalShadowTitle" xml:space="preserve"><value>90°C CPU thermal observation</value></data>
+  <data name="ThermalShadowDescription" xml:space="preserve"><value>Observe decisions only; no power or fan changes. Requires hardware sensors and application restart. Enable logging to inspect decisions.</value></data>
 </root>

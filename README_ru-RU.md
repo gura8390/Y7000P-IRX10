@@ -1,3 +1,5 @@
+> 此文件是上游文档快照。本个人分支仅针对 Y7000P IRX10；下载、温控入口和验收边界请先读 [本仓库 README](README.md)。
+
 <div align="center">
   <img height="128" src="assets/logo.png" alt="Lenovo Legion Toolkit Logo">
   

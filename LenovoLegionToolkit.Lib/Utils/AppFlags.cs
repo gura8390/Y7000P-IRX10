@@ -8,6 +8,7 @@ namespace LenovoLegionToolkit.Lib.Utils;
 public class AppFlags
 {
     private static AppFlags? _instance;
+    public static bool IsInitialized => _instance is not null;
     public static AppFlags Instance => _instance ?? throw new InvalidOperationException("AppFlags must be initialized before access.");
 
     private bool _isTraceEnabled;
@@ -77,7 +78,7 @@ public class AppFlags
     public bool EnableLampArray
     {
         get => _enableLampArray;
-        set { EnableLampArray = value; Save(); }
+        set { _enableLampArray = value; Save(); }
     }
 
     private bool _experimentalGPUWorkingMode;
@@ -236,8 +237,9 @@ public class AppFlags
 
     private static string? StringValue(IEnumerable<string> values, string key)
     {
-        var value = values.FirstOrDefault(s => s.StartsWith(key));
-        return value?.Remove(0, key.Length + 1);
+        var prefix = key + "=";
+        var value = values.FirstOrDefault(s => s.StartsWith(prefix, StringComparison.Ordinal));
+        return value?[prefix.Length..];
     }
 
     public override string ToString() =>

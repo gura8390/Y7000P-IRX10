@@ -30,8 +30,9 @@ public partial class StatusWindow
     private readonly DashboardSettings _dashboardSettings = IoCContainer.Resolve<DashboardSettings>();
     private readonly SensorsControlSettings _sensorsControlSettings = IoCContainer.Resolve<SensorsControlSettings>();
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
+    private readonly LatestSensorRefresh _sensorRefresh;
 
-    private readonly CancellationTokenSource _cancellationTokenSource = new();
+    private CancellationTokenSource _cancellationTokenSource = new();
 
     private DateTime _lastUpdate = DateTime.MinValue;
     private const int UI_UPDATE_THROTTLE_MS = 100;
@@ -123,10 +124,17 @@ public partial class StatusWindow
 
     public StatusWindow()
     {
+        _sensorRefresh = new(RefreshFromSnapshotAsync, ex => Log.Instance.Trace($"StatusWindow update failed.", ex));
         InitializeComponent();
         Loaded += StatusWindow_Loaded;
         SizeChanged += StatusWindow_SizeChanged;
         IsVisibleChanged += StatusWindow_IsVisibleChanged;
+        Closed += (_, _) =>
+        {
+            _sensorRefresh.Deactivate();
+            _cancellationTokenSource.Cancel();
+            _cancellationTokenSource.Dispose();
+        };
         WindowStyle = WindowStyle.None;
         WindowStartupLocation = WindowStartupLocation.Manual;
         ResizeMode = ResizeMode.NoResize;
@@ -211,6 +219,11 @@ public partial class StatusWindow
     {
         if (IsVisible)
         {
+            if (_cancellationTokenSource.IsCancellationRequested)
+            {
+                _cancellationTokenSource.Dispose();
+                _cancellationTokenSource = new CancellationTokenSource();
+            }
             if (!_settings.Store.EnableHardwareSensors)
                 return;
 
@@ -221,29 +234,48 @@ public partial class StatusWindow
                 ? _sensorsControlSettings.Store.SensorsRefreshIntervalSeconds
                 : _dashboardSettings.Store.SensorsRefreshIntervalSeconds;
 
-            _sensorSubscription?.Dispose();
-            _sensorSubscription = _sensorsGroupController.Subscribe(TimeSpan.FromSeconds(refreshInterval), HardwareUpdateScope.Cpu | HardwareUpdateScope.Gpu);
+            try
+            {
+                var defaultInterval = TimeSpan.FromSeconds(_settings.Store.UseNewSensorDashboard
+                    ? new SensorsControlSettings.SensorsControlSettingsStore().SensorsRefreshIntervalSeconds
+                    : new DashboardSettings.DashboardSettingsStore().SensorsRefreshIntervalSeconds);
+                var interval = LatestSensorRefresh.IntervalOrDefault(refreshInterval, defaultInterval);
+                _sensorRefresh.Activate(interval);
+                _sensorSubscription?.Dispose();
+                _sensorSubscription = _sensorsGroupController.Subscribe(interval, HardwareUpdateScope.Cpu | HardwareUpdateScope.Gpu);
+            }
+            catch (Exception ex)
+            {
+                _sensorRefresh.Deactivate();
+                _sensorsGroupController.SensorsUpdated -= OnSensorsUpdated;
+                Log.Instance.Trace($"StatusWindow sensor subscription failed.", ex);
+            }
         }
         else
         {
             _sensorSubscription?.Dispose();
+            _sensorRefresh.Deactivate();
             _sensorsGroupController.SensorsUpdated -= OnSensorsUpdated;
             _cancellationTokenSource.Cancel();
         }
     }
 
-    private async void OnSensorsUpdated(HardwareSensorSnapshot snapshot)
+    private void OnSensorsUpdated(HardwareSensorSnapshot snapshot) => _sensorRefresh.Offer(snapshot);
+
+    private async Task RefreshFromSnapshotAsync(HardwareSensorSnapshot snapshot, Func<bool> isCurrent)
     {
-        var token = _cancellationTokenSource.Token;
+        if (!isCurrent()) return;
         try
         {
-            var data = await GetStatusWindowDataAsync(token, snapshot: snapshot);
-            if (token.IsCancellationRequested) return;
+            // Drain the actual read batch before admitting another one. Hiding invalidates
+            // the UI result through isCurrent, not through a detached cancellation waiter.
+            var data = await GetStatusWindowDataAsync(CancellationToken.None, snapshot: snapshot).ConfigureAwait(false);
+            if (!isCurrent()) return;
 
             if ((DateTime.Now - _lastUpdate).TotalMilliseconds >= UI_UPDATE_THROTTLE_MS)
             {
                 _lastUpdate = DateTime.Now;
-                await Dispatcher.InvokeAsync(() => ApplyDataToUI(data), DispatcherPriority.Normal, token);
+                await Dispatcher.InvokeAsync(() => { if (isCurrent()) ApplyDataToUI(data); }, DispatcherPriority.Normal);
             }
         }
         catch (Exception ex)

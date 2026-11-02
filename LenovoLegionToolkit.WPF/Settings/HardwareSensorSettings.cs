@@ -3,8 +3,16 @@ using LenovoLegionToolkit.Lib.Settings;
 
 namespace LenovoLegionToolkit.WPF.Settings;
 
-public class HardwareSensorSettings() : AbstractSettings<HardwareSensorSettings.HardwareSensorSettingsStore>("hardware_sensors.json")
+public class HardwareSensorSettings : AbstractSettings<HardwareSensorSettings.HardwareSensorSettingsStore>
 {
+    public HardwareSensorSettings() : base("hardware_sensors.json")
+    {
+    }
+
+    internal HardwareSensorSettings(string storageDirectory) : base("hardware_sensors.json", storageDirectory)
+    {
+    }
+
     public class HardwareSensorSettingsStore
     {
         public bool SelectedGpuIsIgpu { get; set; }

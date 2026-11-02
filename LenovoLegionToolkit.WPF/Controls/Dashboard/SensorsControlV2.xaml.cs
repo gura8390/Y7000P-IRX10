@@ -32,6 +32,7 @@ public partial class SensorsControlV2
     private readonly ApplicationSettings _applicationSettings = IoCContainer.Resolve<ApplicationSettings>();
     private readonly DashboardSettings _dashboardSettings = IoCContainer.Resolve<DashboardSettings>();
     private readonly Lock _updateLock = new();
+    private readonly LatestSensorRefresh _sensorRefresh;
     private IDisposable? _sensorSubscription;
     private CancellationTokenSource? _sensorStartCts;
     private bool _subscribedToMessages;
@@ -46,6 +47,7 @@ public partial class SensorsControlV2
 
     public SensorsControlV2()
     {
+        _sensorRefresh = new(RefreshSensorsAsync, ex => Log.Instance.Trace($"Sensor refresh failed.", ex));
         InitializeComponent();
         InitializeContextMenu();
         Loaded += SensorsControl_Loaded;
@@ -257,6 +259,7 @@ public partial class SensorsControlV2
 
     private void StopSensorUpdates()
     {
+        _sensorRefresh.Deactivate();
         _sensorStartCts?.Cancel();
         _sensorStartCts?.Dispose();
         _sensorStartCts = null;
@@ -307,7 +310,9 @@ public partial class SensorsControlV2
         if (_activeSensorItems.Count == 0)
             return;
 
-        var interval = TimeSpan.FromSeconds(intervalSeconds ?? _sensorsControlSettings.Store.SensorsRefreshIntervalSeconds);
+        var defaultInterval = TimeSpan.FromSeconds(new SensorsControlSettings.SensorsControlSettingsStore().SensorsRefreshIntervalSeconds);
+        var interval = LatestSensorRefresh.IntervalOrDefault(
+            intervalSeconds ?? _sensorsControlSettings.Store.SensorsRefreshIntervalSeconds, defaultInterval);
         var cts = new CancellationTokenSource();
         _sensorStartCts = cts;
         _ = StartSensorUpdatesAsync(interval, cts);
@@ -318,6 +323,7 @@ public partial class SensorsControlV2
         var token = cts.Token;
         try
         {
+            _sensorRefresh.Activate(interval);
             var state = await _sensorsGroupControllers.IsSupportedAsync().WaitAsync(token);
             if (token.IsCancellationRequested || !ShouldCollect() || state is not (LibreHardwareMonitorInitialState.Initialized or LibreHardwareMonitorInitialState.Success))
             {
@@ -333,6 +339,7 @@ public partial class SensorsControlV2
             Log.Instance.Trace($"Sensor subscription failed.", ex);
             if (ReferenceEquals(_sensorStartCts, cts))
             {
+                _sensorRefresh.Deactivate();
                 _sensorsGroupControllers.SensorsUpdated -= OnSensorsUpdated;
             }
         }
@@ -346,8 +353,11 @@ public partial class SensorsControlV2
         }
     }
 
-    private async void OnSensorsUpdated(HardwareSensorSnapshot snapshot)
+    private void OnSensorsUpdated(HardwareSensorSnapshot snapshot) => _sensorRefresh.Offer(snapshot);
+
+    private async Task RefreshSensorsAsync(HardwareSensorSnapshot snapshot, Func<bool> isCurrent)
     {
+        if (!isCurrent()) return;
         try
         {
             var dataTask = Task.Run(async () =>
@@ -372,20 +382,20 @@ public partial class SensorsControlV2
             var cpuNameTask = GetProcessedCpuName();
 
             await Task.WhenAll(dataTask, batteryInfoTask, gpuNameTask, cpuNameTask).ConfigureAwait(false);
-
-            _gpuNameTask = gpuNameTask;
-            _cpuNameTask = cpuNameTask;
-
-            await Dispatcher.BeginInvoke(() => UpdateAllSensorValuesV2(
-                dataTask.Result,
-                snapshot,
-                batteryInfoTask.Result
-            ), DispatcherPriority.Background);
+            if (!isCurrent()) return;
+            await Dispatcher.BeginInvoke(() =>
+            {
+                if (!isCurrent()) return;
+                _gpuNameTask = gpuNameTask;
+                _cpuNameTask = cpuNameTask;
+                UpdateAllSensorValuesV2(dataTask.Result, snapshot, batteryInfoTask.Result);
+            }, DispatcherPriority.Background);
         }
         catch (Exception ex)
         {
             Log.Instance.Trace($"Sensor refresh failed: {ex}");
-            await Dispatcher.BeginInvoke(ClearAllSensorValues);
+            if (isCurrent())
+                await Dispatcher.BeginInvoke(() => { if (isCurrent()) ClearAllSensorValues(); });
         }
     }
 
