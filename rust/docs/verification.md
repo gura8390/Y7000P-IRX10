@@ -92,23 +92,39 @@ The corrected source uses one noncreating directory-identity primitive for boot
 backups, instance/pipe identity and autorun paths. The settings store resolves its
 created root before deriving cooperating read/write locks, so short/long aliases
 share the same lock. Existing file-name checks, atomic replacement and previous
-copies remain in place. The complete corrected workspace passed 573 tests in one
+copies remain in place. This intermediate workspace passed 573 tests in one
 run, with no warnings, failures, ignored or filtered tests. This includes seven
 store/path tests, fourteen boot-backup tests, four autorun tests and three CLI
 identity tests; those subsets are not added again to the workspace count.
 
-The corrected candidate freezes 160 compilation inputs with aggregate SHA-256
+That intermediate candidate froze 160 compilation inputs with aggregate SHA-256
 `66984f9af5cb418cb35733655bc92b118dcce6fd7b65ed2a0e5783975061571c`.
-Its GNU Release link completed with no warnings/errors. The matching executable
+Its GNU Release link completed with no warnings/errors. Its historical executable
 is 9,077,431 bytes with SHA-256
 `8f51fb7cd7bbdd46932ebf7d1b19611c43805ac44473d147220416c5c6e6f422`.
+The intermediate source commit `28e84739fc7eab89789d9aad83c4ed3fa66bd82e`
+also passed all 573 tests, Release linking and clean packaging in MSVC CI
+[41517181522](https://github.com/gura8390/Y7000P-IRX10/actions/runs/41517181522).
+Its source, GNU package and successful CI are preserved as historical evidence.
+
+The final self-import correction uses the same directory identity for both
+configuration source and destination. A normal path, extended path or short-name
+alias of the current directory is rejected before changing configuration bytes,
+file inventory or repository revision. The complete workspace passed 574 tests
+in one subsequent run, with no warnings, failures, ignored or filtered tests.
+The corresponding 160-input aggregate is
+`f5b183d819d5c8b0456a15aee1064ce4054f91af17a38f0f83f24b0e71bc8280`.
+The matching GNU Release link completed with no warnings/errors. Its executable
+is 9,077,431 bytes with SHA-256
+`1f46ad5e88dfd7d72df3fc59bd54289b0597c7a59203c1f7888463249fd1b832`.
 The exact archive source revision and file hashes are recorded in its manifest;
-they must not be replaced with the historical values above. The normal Release
-still requires the operating system's administrator
+do not substitute the preserved intermediate hashes.
+The normal Release still requires the operating system's administrator
 confirmation. Static inspection and isolated tests do not prove its normal
 elevated application or device lifecycle has been accepted.
 
-A separate actual full-app Debug/asInvoker read-only session exited successfully
+Before these directory-identity corrections, a separate actual full-app
+Debug/asInvoker read-only session exited successfully
 with backend readiness, verified shutdown, no remaining broker, zero stderr bytes
 and zero profile files. Window creation was about 283 ms; backend readiness was
 about 1,381 ms in this one observation. The complete observed process tree included

@@ -172,7 +172,11 @@ impl ConfigRepository {
     /// Explicit import copies complete original documents into this application's own
     /// directory. It does not write the C# source directory or execute stored actions.
     pub fn import_legacy(&mut self, legacy_root: &std::path::Path) -> Result<usize> {
-        ensure!(legacy_root != self.root(), "导入来源不能是当前配置目录");
+        ensure!(
+            jiks_store::canonical_directory_path(legacy_root)?
+                != jiks_store::canonical_directory_path(self.root())?,
+            "导入来源不能是当前配置目录"
+        );
         let mut pending = Vec::new();
         for &(key, name) in DOCUMENTS {
             let path = legacy_root.join(name);
@@ -401,5 +405,50 @@ mod tests {
             std::fs::read_to_string(source.0.join("settings.json")).unwrap(),
             original
         );
+    }
+
+    #[test]
+    fn import_rejects_normal_extended_and_short_self_aliases_without_any_write() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+        let fixture = Fixture::new();
+        std::fs::write(
+            fixture.0.join("settings.json"),
+            br#"{"EnableCpuThermalControl":true,"Future":1e9999}"#,
+        ).unwrap();
+        std::fs::write(
+            fixture.0.join("automation.json"),
+            br#"{"IsEnabled":true,"Pipelines":[],"Future":-0}"#,
+        ).unwrap();
+        std::fs::write(
+            fixture.0.join("macro.json"),
+            br#"{"IsEnabled":true,"Sequences":{},"Future":1.234567890123456789}"#,
+        ).unwrap();
+        std::fs::write(fixture.0.join("opaque.txt"), b"unchanged sidecar").unwrap();
+        let mut repository = ConfigRepository::load(&fixture.0).unwrap();
+        assert!(repository.errors().is_empty());
+        assert_eq!(repository.value("application").unwrap()["EnableCpuThermalControl"], true);
+        let revision = repository.revision;
+        let contents = || -> BTreeMap<_, _> {
+            std::fs::read_dir(&fixture.0).unwrap().map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), std::fs::read(entry.path()).unwrap())
+            }).collect()
+        };
+        let before = contents();
+        let extended = fixture.0.canonicalize().unwrap();
+        let normal = PathBuf::from(extended.to_str().unwrap().strip_prefix(r"\\?\").unwrap());
+        let input: Vec<u16> = normal.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut buffer = vec![0u16; 32768];
+        let length = unsafe { GetShortPathNameW(input.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) };
+        assert!(length > 0 && (length as usize) < buffer.len());
+        let short = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]));
+        for alias in [normal, extended, short] {
+            let error = repository.import_legacy(&alias).unwrap_err();
+            assert!(error.to_string().contains("导入来源不能是当前配置目录"));
+            assert_eq!(contents(), before);
+            assert_eq!(repository.revision, revision);
+            assert_eq!(repository.value("application").unwrap()["EnableCpuThermalControl"], true);
+        }
     }
 }
