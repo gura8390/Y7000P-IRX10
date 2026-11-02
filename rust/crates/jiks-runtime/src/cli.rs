@@ -21,11 +21,24 @@ const LIMIT: usize = 64 * 1024;
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
-fn name(root: &Path) -> String {
-    format!(
+fn profile_path(root: &Path) -> Result<String> {
+    ensure!(root.is_absolute(), "实例配置目录必须是完整绝对路径");
+    let canonical = jiks_store::canonical_directory_path(root)?;
+    let path = canonical
+        .to_str()
+        .context("实例配置目录不是有效Unicode")?
+        .replace('/', "\\");
+    Ok(path
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&path)
+        .trim_end_matches('\\')
+        .to_lowercase())
+}
+fn name(root: &Path) -> Result<String> {
+    Ok(format!(
         r"\\.\pipe\Jiks-{:x}",
-        Sha256::digest(root.to_string_lossy().to_lowercase().as_bytes())
-    )
+        Sha256::digest(profile_path(root)?.as_bytes())
+    ))
 }
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -46,16 +59,8 @@ pub struct InstanceLease(Handle);
 impl InstanceLease {
     pub fn key(root: &Path) -> Result<String> {
         unsafe {
-            ensure!(root.is_absolute(), "实例配置目录必须是完整绝对路径");
-            let root = std::path::absolute(root)?;
-            let root = std::fs::canonicalize(&root).unwrap_or(root);
+            let root = profile_path(root)?;
             let (sid, elevated) = token_identity(GetCurrentProcess())?;
-            let root = root.to_string_lossy().replace('/', "\\");
-            let root = root
-                .strip_prefix(r"\\?\")
-                .unwrap_or(&root)
-                .trim_end_matches('\\')
-                .to_lowercase();
             let mut hash = Sha256::new();
             hash.update(root.as_bytes());
             hash.update(sid);
@@ -226,7 +231,7 @@ pub struct Endpoint {
 impl Endpoint {
     pub fn open(root: &Path) -> Result<Self> {
         unsafe {
-            let path = wide(&name(root));
+            let path = wide(&name(root)?);
             let h = CreateNamedPipeW(
                 path.as_ptr(),
                 PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
@@ -374,7 +379,11 @@ mod tests {
             jiks_platform::monotonic_ms()
         ));
         let mut server = Endpoint::open(&root).unwrap();
-        let client = std::thread::spawn(move || request(&root, Request::Status));
+        // The endpoint can precede profile creation. A client using the now
+        // canonical long spelling must still connect to that same endpoint.
+        std::fs::create_dir_all(&root).unwrap();
+        let client_root = root.canonicalize().unwrap();
+        let client = std::thread::spawn(move || request(&client_root, Request::Status));
         let started = Instant::now();
         let mut got = false;
         while !client.is_finished() {
@@ -395,6 +404,37 @@ mod tests {
         assert!(got && response.ok);
         assert_eq!(response.value["hardware_actions"], 0);
         assert_eq!(response.message, "fixture actual response");
+        drop(server);
+        std::fs::remove_dir(root).unwrap();
+    }
+    #[test]
+    fn instance_and_pipe_identity_are_stable_across_short_alias_and_creation() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let parent = std::env::temp_dir().join(format!(
+            "JiksInstance-LongAncestor-{}-{}",
+            std::process::id(),
+            jiks_platform::monotonic_ms()
+        ));
+        std::fs::create_dir(&parent).unwrap();
+        let wide: Vec<u16> = parent.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut buffer = vec![0u16; 32768];
+        let length =
+            unsafe { GetShortPathNameW(wide.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) };
+        assert!(length > 0 && (length as usize) < buffer.len());
+        let alias =
+            std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]));
+        let root = alias.join("uncreated-parent").join("profile");
+        let lease = InstanceLease::acquire(&root).unwrap().unwrap();
+        let key_before = InstanceLease::key(&root).unwrap();
+        let pipe_before = name(&root).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let canonical = root.canonicalize().unwrap();
+        assert_eq!(key_before, InstanceLease::key(&canonical).unwrap());
+        assert_eq!(pipe_before, name(&canonical).unwrap());
+        assert!(InstanceLease::acquire(&canonical).unwrap().is_none());
+        drop(lease);
+        assert!(parent.is_absolute() && parent.starts_with(std::env::temp_dir()));
+        std::fs::remove_dir_all(parent).unwrap();
     }
 }
 // Only a live endpoint can execute commands. The client never initializes hardware.
@@ -402,7 +442,7 @@ pub fn request(root: &Path, request: Request) -> Result<Response> {
     let mut bytes = serde_json::to_vec(&request)?;
     ensure!(bytes.len() < LIMIT, "CLI请求过大");
     bytes.push(b'\n');
-    let path = name(root);
+    let path = name(root)?;
     let started = Instant::now();
     let mut pipe = loop {
         match std::fs::OpenOptions::new()

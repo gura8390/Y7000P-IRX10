@@ -78,7 +78,7 @@ impl BackupStore {
         // Windows TEMP can contain an 8.3 alias; hashing absolute() before the
         // first write and canonicalize() afterwards would bind one directory
         // to two different identities and prevent legitimate recovery.
-        let absolute = canonical_future_directory(&root)?;
+        let absolute = jiks_store::canonical_directory_path(&root)?;
         let path = absolute
             .to_str()
             .context("Non-Unicode boot data directory")?
@@ -391,34 +391,6 @@ impl BackupStore {
             out.push(serde_json::json!({"id":id,"created_unix_ms":record.created_unix_ms,"state":record.state,"enabled":record.baseline.firmware.as_ref().map(|f|f.info.bytes.first()==Some(&1))}));
         }
         Ok(out)
-    }
-}
-fn canonical_future_directory(path: &Path) -> Result<PathBuf> {
-    checked_path(path)?;
-    let mut ancestor = std::path::absolute(path)?;
-    let mut suffix = Vec::new();
-    loop {
-        match fs::symlink_metadata(&ancestor) {
-            Ok(meta) => {
-                ensure!(meta.is_dir(), "Boot data ancestor is not a directory");
-                let mut resolved = ancestor.canonicalize()?;
-                for component in suffix.into_iter().rev() {
-                    resolved.push(component);
-                }
-                checked_path(&resolved)?;
-                return Ok(resolved);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                suffix.push(
-                    ancestor
-                        .file_name()
-                        .context("Boot data path has no existing ancestor")?
-                        .to_os_string(),
-                );
-                ensure!(ancestor.pop(), "Boot data path has no existing ancestor");
-            }
-            Err(error) => return Err(error.into()),
-        }
     }
 }
 fn bounded_read(path: &Path, max: usize) -> Result<Vec<u8>> {

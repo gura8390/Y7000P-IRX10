@@ -70,14 +70,43 @@ run that did not reach a new stage is not relabeled as a passing complete test.
 Native GPU status classification and ABI packets have pure tests. Those tests do
 not initialize NVAPI, perform a GPU query or prove a state transition on hardware.
 
-The final code candidate freezes 160 Rust/Cargo inputs with aggregate SHA-256
+The first local candidate froze 160 Rust/Cargo inputs with aggregate SHA-256
 `776d52f9a7e78fb9b89568d6b52654cd41b83558e0293cbd12da26b45ab2c2a0`.
-The GNU Release link completed with no warnings/errors. Its AMD64 GUI executable
+That historical GNU Release link completed with no warnings/errors. Its executable
 is 9,072,626 bytes with SHA-256
 `24360593713c70149e01f02fb06717bf3e4423a8e3c5d1b9f02c02de10520021`.
 Static PE verification found the expected `requireAdministrator` manifest and
 resolved static imports without a developer-PATH dependency. The executable was
-not launched through an elevation bypass.
+not launched through an elevation bypass. This first binary and archive are
+preserved as historical artifacts and are not the current candidate.
+
+The first two MSVC CI runs exposed Windows 8.3/long-path identity defects in boot
+backup binding and the profile's single-instance/CLI identities. Their failed
+results are retained rather than relabeled. The intermediate boot-only snapshot
+had aggregate `8c02a6c8763cf08d78efb7120ef1fc473e92e3baeb637e042407a1894b8cb9ca`
+and Release executable SHA-256
+`425aabc146fd19200f67502ff75d69805f8838bb2bb0ce774cf105d862ead39c`;
+that intermediate executable is also superseded.
+
+The corrected source uses one noncreating directory-identity primitive for boot
+backups, instance/pipe identity and autorun paths. The settings store resolves its
+created root before deriving cooperating read/write locks, so short/long aliases
+share the same lock. Existing file-name checks, atomic replacement and previous
+copies remain in place. The complete corrected workspace passed 573 tests in one
+run, with no warnings, failures, ignored or filtered tests. This includes seven
+store/path tests, fourteen boot-backup tests, four autorun tests and three CLI
+identity tests; those subsets are not added again to the workspace count.
+
+The corrected candidate freezes 160 compilation inputs with aggregate SHA-256
+`66984f9af5cb418cb35733655bc92b118dcce6fd7b65ed2a0e5783975061571c`.
+Its GNU Release link completed with no warnings/errors. The matching executable
+is 9,077,431 bytes with SHA-256
+`8f51fb7cd7bbdd46932ebf7d1b19611c43805ac44473d147220416c5c6e6f422`.
+The exact archive source revision and file hashes are recorded in its manifest;
+they must not be replaced with the historical values above. The normal Release
+still requires the operating system's administrator
+confirmation. Static inspection and isolated tests do not prove its normal
+elevated application or device lifecycle has been accepted.
 
 A separate actual full-app Debug/asInvoker read-only session exited successfully
 with backend readiness, verified shutdown, no remaining broker, zero stderr bytes
@@ -92,8 +121,11 @@ UI Automation could read the isolated native layout. The occluded screenshot
 attempt was not accepted as visual validation. Visual review, the normal Release
 OS-confirmation path and actual-device acceptance remain explicit user-session
 checks. Final archive hashes are recorded outside this source file to avoid a
-commit/hash cycle. A future remote branch and CI run are verified against their
-actual commit/run IDs; this local record does not claim an unperformed remote CI.
+commit/hash cycle. The source branch is published separately from any installer
+or stable release. Remote CI results must be checked against the exact archive
+source commit in the [Rust build workflow](https://github.com/gura8390/Y7000P-IRX10/actions/workflows/rust.yml);
+the earlier failed runs and local GNU tests do not imply that a later MSVC job
+has passed. C# main, its version tag and its release remain separate.
 
 ## Performance evidence
 

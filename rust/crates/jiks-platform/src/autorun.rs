@@ -353,10 +353,7 @@ fn native_spec(root: &Path) -> Result<Spec> {
     let spec = Spec {
         sid,
         executable: display_path(&executable)?,
-        data_root: std::path::absolute(root)?
-            .to_str()
-            .context("Non-Unicode data path")?
-            .into(),
+        data_root: display_path(&jiks_store::canonical_directory_path(root)?)?,
         working_directory: display_path(working)?,
         highest,
     };
@@ -581,6 +578,42 @@ mod tests {
             working_directory: "D:\\应用".into(),
             highest: true,
         }
+    }
+    #[test]
+    fn data_directory_alias_does_not_make_an_owned_task_action_stale() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+        let parent = std::env::temp_dir().join(format!(
+            "JiksAutorun-LongAncestor-{}-{}",
+            std::process::id(),
+            crate::monotonic_ms()
+        ));
+        std::fs::create_dir(&parent).unwrap();
+        let wide: Vec<u16> = parent.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut buffer = vec![0u16; 32768];
+        let length =
+            unsafe { GetShortPathNameW(wide.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) };
+        assert!(length > 0 && (length as usize) < buffer.len());
+        let alias =
+            std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]));
+        let root = alias.join("new-data");
+        let mut before = spec();
+        before.data_root =
+            display_path(&jiks_store::canonical_directory_path(&root).unwrap()).unwrap();
+        let task = view(&before, Mode::Normal);
+        assert!(!root.exists());
+        std::fs::create_dir(&root).unwrap();
+        let mut after = before.clone();
+        after.data_root = display_path(
+            &jiks_store::canonical_directory_path(&root.canonicalize().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert!(status(Some(&task), &after).unwrap().action_matches);
+        let mut other = after.clone();
+        other.data_root.push_str("-different");
+        assert!(!status(Some(&task), &other).unwrap().action_matches);
+        assert!(parent.is_absolute() && parent.starts_with(std::env::temp_dir()));
+        std::fs::remove_dir_all(parent).unwrap();
     }
     fn view(s: &Spec, mode: Mode) -> TaskView {
         TaskView {
