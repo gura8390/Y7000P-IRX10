@@ -1,0 +1,17 @@
+[package]
+name = "jiks-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+jiks-core = { path = "../jiks-core" }
+jiks-platform = { path = "../jiks-platform" }
+jiks-store = { path = "../jiks-store" }
+anyhow.workspace = true
+sha2.workspace = true
+quick-xml.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+windows-sys.workspace = true

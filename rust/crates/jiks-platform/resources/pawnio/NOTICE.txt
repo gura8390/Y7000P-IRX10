@@ -1,0 +1,52 @@
+IntelMSR.bin is an unmodified signed PawnIO module (release 0.2.11).
+Copyright (C) 2025 namazso. SPDX-License-Identifier: LGPL-2.1-or-later.
+License: COPYING in this directory.
+Module source: https://github.com/namazso/PawnIO.Modules/tree/0.2.11
+Module source file: IntelMSR.p
+SHA-256: d6ed85d65ab17a22f813ef98207d6d537155ee2ded5976a21cb48413c9b92e5f
+Size: 5324 bytes.
+
+Obtained from the exact original application's dependency source snapshot:
+LenovoLegionToolkit-Team/LibreHardwareMonitor commit
+ad760baba99c7c4ad6c86c5c57fb3ba766a7ee71,
+LibreHardwareMonitorLib/Resources/PawnIo/IntelMSR.bin.
+
+The Rust adapter calls only ioctl_read_msr for a fixed read-register allowlist.
+It provides no arbitrary module/function/IOCTL interface and never calls the
+module's ioctl_write_msr. Driver install/start/stop is not implemented.
+
+The following unmodified signed modules were copied from the exact original
+RAMSPDToolkit-NDD 1.6.3 source snapshot, commit
+69aab150784385dc2733a31f3332f646ab3c2e16, Resources/Binaries/:
+
+SmbusI801.bin (55540 bytes)
+SHA-256: a0f7d066e7efda28c0e754c1f52dbd8dc280d388ba8575b514a80cb67490530c
+SmbusIntelSkylakeIMC.bin (19828 bytes)
+SHA-256: 2e2d6c1e541fdfe598aa8df4d334e11c491c8a84f23e8256dd18119dd420dbd2
+
+PawnIO.Modules corresponding source and LGPL-2.1-or-later notices:
+https://github.com/namazso/PawnIO.Modules/tree/0.2.11
+SmbusI801.p (Copyright 2025 Steve-Tech)
+SmbusIntelSkylakeIMC.p (Copyright 2026 Blacktempel, Adam Honse)
+COPYING in this directory contains the LGPL-2.1 license.
+The copied binary provenance is the fixed RAMSPD snapshot; no binary was
+rebuilt or resigned. Native reads allow only DDR5 identity, capability/enabled,
+page and temperature registers under the standard global SMBus mutex. An
+explicitly enabled sensor request may temporarily clear MR11 page bits 0..2
+and must restore the complete original byte with independent readback.
+No EEPROM/PMIC, addressing-mode, thermal-enable, threshold or write-protection
+modification is exposed.
+
+Both copied module hashes were independently matched byte-for-byte against
+the official PawnIO.Modules 0.2.11 release_0_2_11.zip on 2026-11-03.
+Official archive SHA-256 (also matched the GitHub asset digest):
+43608cb89bc84247fef1368a139013f7d043e17db6d6c8dfc9b46bf0905a81f4
+This confirms the 0.2.11 source correspondence above; it was a byte audit only,
+not a module load, signature-verification execution or sensor test.
+
+Unmodified source, all include files and the original upstream build workflow
+for all three redistributed modules are supplied in source/ at immutable commit
+52a7e536dff3e53c96917a28caac5e0fa6510696. SOURCE-README.txt explains the source
+inventory and compiler inputs; source/source-manifest.json records Git blob IDs
+and SHA-256 values. Public binary packages include the same source inputs under
+licenses/PawnIO-source/. No private signing material is included.

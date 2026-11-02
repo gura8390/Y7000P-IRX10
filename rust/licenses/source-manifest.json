@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "scope": "Unmodified license texts only; no dependency code was executed",
+  "files": [
+    {
+      "path": "LibreHardwareMonitor-MPL-2.0.txt",
+      "repository": "LenovoLegionToolkit-Team/LibreHardwareMonitor",
+      "commit": "ad760baba99c7c4ad6c86c5c57fb3ba766a7ee71",
+      "upstream_path": "LICENSE",
+      "source": "https://raw.githubusercontent.com/LenovoLegionToolkit-Team/LibreHardwareMonitor/ad760baba99c7c4ad6c86c5c57fb3ba766a7ee71/LICENSE",
+      "bytes": 16725,
+      "git_blob_sha1": "a612ad9813b006ce81d1ee438dd784da99a54007",
+      "sha256": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5"
+    },
+    {
+      "path": "RAMSPDToolkit-MPL-2.0.txt",
+      "repository": "Blacktempel/RAMSPDToolkit",
+      "commit": "69aab150784385dc2733a31f3332f646ab3c2e16",
+      "upstream_path": "LICENSE",
+      "source": "https://raw.githubusercontent.com/Blacktempel/RAMSPDToolkit/69aab150784385dc2733a31f3332f646ab3c2e16/LICENSE",
+      "bytes": 16726,
+      "git_blob_sha1": "d0a1fa1482eea82e19510e7920cbe3a03e41f691",
+      "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
+    },
+    {
+      "path": "NvAPIWrapper-LGPL-3.0.txt",
+      "repository": "LenovoLegionToolkit-Team/NvAPIWrapper",
+      "commit": "0bc0ff2ef72dec39a8882c0d2b4259bc0c6448bc",
+      "upstream_path": "LICENSE",
+      "source": "https://raw.githubusercontent.com/LenovoLegionToolkit-Team/NvAPIWrapper/0bc0ff2ef72dec39a8882c0d2b4259bc0c6448bc/LICENSE",
+      "bytes": 7651,
+      "git_blob_sha1": "65c5ca88a67c30becee01c5a8816d964b03862f9",
+      "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768"
+    }
+  ]
+}

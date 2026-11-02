@@ -1,0 +1,24 @@
+//! Application coordination. Native UI code consumes owned state and sends commands.
+pub mod automation_executor;
+pub mod automation_events;
+pub mod automation_process;
+pub mod automation_runtime;
+pub mod config;
+pub mod cli;
+pub mod config_actions;
+pub mod hardware_projection;
+pub mod hardware_routes;
+pub mod hardware_feedback;
+pub mod ipc;
+mod ipc_output;
+pub mod maintenance;
+pub mod macros;
+pub mod packages;
+pub mod special_keys;
+pub mod startup_arguments;
+mod physical_port;
+mod sensor_presentation;
+mod time_values;
+pub mod service;
+mod service_engine;
+pub mod thermal_control;

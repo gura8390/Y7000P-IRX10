@@ -1,0 +1,25 @@
+FPS provider reference and attribution
+
+The provider/statistics contract was reviewed against LLT.PresentMonFps
+2.0.8-pre.12, repository commit:
+14090bab95fc9264f3f761be47b1a126e78037f1
+https://github.com/LenovoLegionToolkit-Team/PresentMonFps/tree/14090bab95fc9264f3f761be47b1a126e78037f1
+Copyright (c) 2024 ema. MIT license: LICENSE in this directory.
+
+Jiks uses Rust with Windows SDK ETW functions directly. It does not redistribute
+or host the CLR TraceEvent wrapper, and does not call a PresentMon native DLL.
+The original provider selects DxgKrnl GUID
+802ec45a-1e99-4b83-9920-87c98277ba9d, event 0x00b8, keyword 0x1, by process ID.
+These are process-aggregate kernel Present timestamps, not displayed frames,
+swapchain-isolated FPS, GPU execution time, dropped-frame analysis, or generated
+frame identification. The user-facing source must preserve this distinction.
+
+Statistics retain at most 500 intervals (501 timestamps for a full window).
+Average cadence counts n intervals divided by their summed duration, correcting
+the old wrapper's n-1 bias. 1% Low is the arithmetic mean of the instantaneous
+rates of the slowest five intervals, not the inverse of their mean duration.
+The last-interval value is a Present interval, not measured render execution.
+
+Only explicit collection may start an owned Jiks-Fps session. No orphan-session
+enumeration, foreign-session takeover, driver install, hardware mode setting or
+automatic startup/benchmark collection is included.

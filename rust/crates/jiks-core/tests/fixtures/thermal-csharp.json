@@ -1,0 +1,2850 @@
+{
+  "schema": 1,
+  "generator": "GoldenThermal standalone net8 CLI; four original C# pure sources linked unchanged",
+  "source_sha256": {
+    "ThermalPolicy.cs": "fda328bab3c053a74e33fceb06c8c90bc032423400f40bf60cf468711edace11",
+    "PowerConstraintArbiter.cs": "76ed5661b524628861eeeb3e2c80f70c68a63797a4322c19a11e90069bb35c3a",
+    "HardwareCommandExecutor.cs": "f95e26e8755beaf22d7891525c5ea484c5f13fe27fb171556512460b0f98ca13",
+    "ThermalControlSupervisor.cs": "7bd48022357e4e55abe9bb376faf839197f0d879e7b6fb8a4a7065af4b2de632"
+  },
+  "target_framework": "net8.0",
+  "runtime": ".NET 8.0.29",
+  "synthetic_only": true,
+  "hardware_calls": false,
+  "application_performance_benchmark": false,
+  "baseline": {
+    "long_watts": 70,
+    "short_watts": 125
+  },
+  "capability": {
+    "min_long": 50,
+    "max_long": 135,
+    "min_short": 60,
+    "max_short": 195,
+    "step": 1
+  },
+  "policy_cases": [
+    {
+      "id": "default_hot_minimum_slow_recovery",
+      "source": "package_core",
+      "options": {
+        "target_c": 90,
+        "warm_c": 87,
+        "recover_c": 86,
+        "freshness_ms": 2000,
+        "recovery_ms": 20000,
+        "adjustment_ms": 2000,
+        "minimum_fraction": 0.35,
+        "reduction": 0.1,
+        "warm_reduction": 0.1,
+        "recovery_step": 0.02
+      },
+      "steps": [
+        {
+          "now": 0,
+          "package": {
+            "celsius": 68,
+            "sampled_at_ms": 0
+          },
+          "core": {
+            "celsius": 70,
+            "sampled_at_ms": 0
+          },
+          "expected": {
+            "phase": "Normal",
+            "power_fraction": 1,
+            "request_cooling": false,
+            "cool_since_ms": 0,
+            "last_adjustment_ms": 0,
+            "evaluated_at_ms": 0
+          },
+          "fraction_scaled_target": {
+            "long_watts": 70,
+            "short_watts": 125
+          },
+          "expires_at_ms": 1500
+        },
+        {
+          "now": 1000,
+          "package": {
+            "celsius": 85,
+            "sampled_at_ms": 1000
+          },
+          "core": {
+            "celsius": 87,
+            "sampled_at_ms": 1000
+          },
+          "expected": {
+            "phase": "Warm",
+            "power_fraction": 0.9,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 1000,
+            "evaluated_at_ms": 1000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 63,
+            "short_watts": 112
+          },
+          "expires_at_ms": 2500
+        },
+        {
+          "now": 1500,
+          "package": {
+            "celsius": 88,
+            "sampled_at_ms": 1500
+          },
+          "core": {
+            "celsius": 90,
+            "sampled_at_ms": 1500
+          },
+          "expected": {
+            "phase": "Hot",
+            "power_fraction": 0.9,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 1000,
+            "evaluated_at_ms": 1500
+          },
+          "fraction_scaled_target": {
+            "long_watts": 63,
+            "short_watts": 112
+          },
+          "expires_at_ms": 3000
+        },
+        {
+          "now": 3000,
+          "package": {
+            "celsius": 90,
+            "sampled_at_ms": 3000
+          },
+          "core": {
+            "celsius": 92,
+            "sampled_at_ms": 3000
+          },
+          "expected": {
+            "phase": "Hot",
+            "power_fraction": 0.8,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 3000,
+            "evaluated_at_ms": 3000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 56,
+            "short_watts": 100
+          },
+          "expires_at_ms": 4500
+        },
+        {
+          "now": 5000,
+          "package": {
+            "celsius": 92,
+            "sampled_at_ms": 5000
+          },
+          "core": {
+            "celsius": 94,
+            "sampled_at_ms": 5000
+          },
+          "expected": {
+            "phase": "Hot",
+            "power_fraction": 0.7000000000000001,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 5000,
+            "evaluated_at_ms": 5000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 50,
+            "short_watts": 87
+          },
+          "expires_at_ms": 6500
+        },
+        {
+          "now": 7000,
+          "package": {
+            "celsius": 94,
+            "sampled_at_ms": 7000
+          },
+          "core": {
+            "celsius": 96,
+            "sampled_at_ms": 7000
+          },
+          "expected": {
+            "phase": "Hot",
+            "power_fraction": 0.6000000000000001,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 7000,
+            "evaluated_at_ms": 7000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 50,
+            "short_watts": 75
+          },
+          "expires_at_ms": 8500
+        },
+        {
+          "now": 9000,
+          "package": {
+            "celsius": 91,
+            "sampled_at_ms": 9000
+          },
+          "core": {
+            "celsius": 93,
+            "sampled_at_ms": 9000
+          },
+          "expected": {
+            "phase": "Hot",
+            "power_fraction": 0.5000000000000001,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 9000,
+            "evaluated_at_ms": 9000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 50,
+            "short_watts": 62
+          },
+          "expires_at_ms": 10500
+        },
+        {
+          "now": 11000,
+          "package": {
+            "celsius": 90,
+            "sampled_at_ms": 11000
+          },
+          "core": {
+            "celsius": 92,
+            "sampled_at_ms": 11000
+          },
+          "expected": {
+            "phase": "Hot",
+            "power_fraction": 0.40000000000000013,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 11000,
+            "evaluated_at_ms": 11000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 50,
+            "short_watts": 60
+          },
+          "expires_at_ms": 12500
+        },
+        {
+          "now": 13000,
+          "package": {
+            "celsius": 89,
+            "sampled_at_ms": 13000
+          },
+          "core": {
+            "celsius": 91,
+            "sampled_at_ms": 13000
+          },
+          "expected": {
+            "phase": "Hot",
+            "power_fraction": 0.35,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 13000,
+            "evaluated_at_ms": 13000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 50,
+            "short_watts": 60
+          },
+          "expires_at_ms": 14500
+        },
+        {
+          "now": 15000,
+          "package": {
+            "celsius": 88,
+            "sampled_at_ms": 15000
+          },
+          "core": {
+            "celsius": 90,
+            "sampled_at_ms": 15000
+          },
+          "expected": {
+            "phase": "Hot",
+            "power_fraction": 0.35,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 15000,
+            "evaluated_at_ms": 15000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 50,
+            "short_watts": 60
+          },
+          "expires_at_ms": 16500
+        },
+        {
+          "now": 17000,
+          "package": {
+            "celsius": 84.5,
+            "sampled_at_ms": 17000
+          },
+          "core": {
+            "celsius": 86.5,
+            "sampled_at_ms": 17000
+          },
+          "expected": {
+            "phase": "Recovering",
+            "power_fraction": 0.35,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 15000,
+            "evaluated_at_ms": 17000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 50,
+            "short_watts": 60
+          },
+          "expires_at_ms": 18500
+        },
+        {
+          "now": 19000,
+          "package": {
+            "celsius": 84,
+            "sampled_at_ms": 19000
+          },
+          "core": {
+            "celsius": 86,
+            "sampled_at_ms": 19000
+          },
+          "expected": {
+            "phase": "Recovering",
+            "power_fraction": 0.35,
+            "request_cooling": true,
+            "cool_since_ms": 19000,
+            "last_adjustment_ms": 15000,
+            "evaluated_at_ms": 19000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 50,
+            "short_watts": 60
+          },
+          "expires_at_ms": 20500
+        },
+        {
+          "now": 38000,
+          "package": {
+            "celsius": 78,
+            "sampled_at_ms": 38000
+          },
+          "core": {
+            "celsius": 80,
+            "sampled_at_ms": 38000
+          },
+          "expected": {
+            "phase": "Recovering",
+            "power_fraction": 0.35,
+            "request_cooling": true,
+            "cool_since_ms": 19000,
+            "last_adjustment_ms": 15000,
+            "evaluated_at_ms": 38000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 50,
+            "short_watts": 60
+          },
+          "expires_at_ms": 39500
+        },
+        {
+          "now": 39000,
+          "package": {
+            "celsius": 78,
+            "sampled_at_ms": 39000
+          },
+          "core": {
+            "celsius": 80,
+            "sampled_at_ms": 39000
+          },
+          "expected": {
+            "phase": "Recovering",
+            "power_fraction": 0.37,
+            "request_cooling": true,
+            "cool_since_ms": 19000,
+            "last_adjustment_ms": 39000,
+            "evaluated_at_ms": 39000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 50,
+            "short_watts": 60
+          },
+          "expires_at_ms": 40500
+        },
+        {
+          "now": 41000,
+          "package": {
+            "celsius": 78,
+            "sampled_at_ms": 41000
+          },
+          "core": {
+            "celsius": 80,
+            "sampled_at_ms": 41000
+          },
+          "expected": {
+            "phase": "Recovering",
+            "power_fraction": 0.39,
+            "request_cooling": true,
+            "cool_since_ms": 19000,
+            "last_adjustment_ms": 41000,
+            "evaluated_at_ms": 41000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 50,
+            "short_watts": 60
+          },
+          "expires_at_ms": 42500
+        },
+        {
+          "now": 43000,
+          "package": {
+            "celsius": 78,
+            "sampled_at_ms": 43000
+          },
+          "core": {
+            "celsius": 80,
+            "sampled_at_ms": 43000
+          },
+          "expected": {
+            "phase": "Recovering",
+            "power_fraction": 0.41000000000000003,
+            "request_cooling": true,
+            "cool_since_ms": 19000,
+            "last_adjustment_ms": 43000,
+            "evaluated_at_ms": 43000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 50,
+            "short_watts": 60
+          },
+          "expires_at_ms": 44500
+        }
+      ]
+    },
+    {
+      "id": "application_firmware_thresholds",
+      "source": "firmware",
+      "options": {
+        "target_c": 88,
+        "warm_c": 85,
+        "recover_c": 82,
+        "freshness_ms": 2000,
+        "recovery_ms": 20000,
+        "adjustment_ms": 2000,
+        "minimum_fraction": 0.35,
+        "reduction": 0.1,
+        "warm_reduction": 0.1,
+        "recovery_step": 0.02
+      },
+      "steps": [
+        {
+          "now": 0,
+          "package": {
+            "celsius": 75,
+            "sampled_at_ms": 0
+          },
+          "core": {
+            "celsius": null,
+            "sampled_at_ms": 0
+          },
+          "expected": {
+            "phase": "Normal",
+            "power_fraction": 1,
+            "request_cooling": false,
+            "cool_since_ms": 0,
+            "last_adjustment_ms": 0,
+            "evaluated_at_ms": 0
+          },
+          "fraction_scaled_target": {
+            "long_watts": 70,
+            "short_watts": 125
+          },
+          "expires_at_ms": 1500
+        },
+        {
+          "now": 500,
+          "package": {
+            "celsius": 85,
+            "sampled_at_ms": 500
+          },
+          "core": {
+            "celsius": null,
+            "sampled_at_ms": 0
+          },
+          "expected": {
+            "phase": "Warm",
+            "power_fraction": 0.9,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 500,
+            "evaluated_at_ms": 500
+          },
+          "fraction_scaled_target": {
+            "long_watts": 63,
+            "short_watts": 112
+          },
+          "expires_at_ms": 2000
+        },
+        {
+          "now": 1000,
+          "package": {
+            "celsius": 88,
+            "sampled_at_ms": 1000
+          },
+          "core": {
+            "celsius": null,
+            "sampled_at_ms": 0
+          },
+          "expected": {
+            "phase": "Hot",
+            "power_fraction": 0.9,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 500,
+            "evaluated_at_ms": 1000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 63,
+            "short_watts": 112
+          },
+          "expires_at_ms": 2500
+        },
+        {
+          "now": 2500,
+          "package": {
+            "celsius": 90,
+            "sampled_at_ms": 2500
+          },
+          "core": {
+            "celsius": null,
+            "sampled_at_ms": 0
+          },
+          "expected": {
+            "phase": "Hot",
+            "power_fraction": 0.8,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 2500,
+            "evaluated_at_ms": 2500
+          },
+          "fraction_scaled_target": {
+            "long_watts": 56,
+            "short_watts": 100
+          },
+          "expires_at_ms": 4000
+        },
+        {
+          "now": 4500,
+          "package": {
+            "celsius": 82,
+            "sampled_at_ms": 4500
+          },
+          "core": {
+            "celsius": null,
+            "sampled_at_ms": 0
+          },
+          "expected": {
+            "phase": "Recovering",
+            "power_fraction": 0.8,
+            "request_cooling": true,
+            "cool_since_ms": 4500,
+            "last_adjustment_ms": 2500,
+            "evaluated_at_ms": 4500
+          },
+          "fraction_scaled_target": {
+            "long_watts": 56,
+            "short_watts": 100
+          },
+          "expires_at_ms": 6000
+        },
+        {
+          "now": 24500,
+          "package": {
+            "celsius": 82,
+            "sampled_at_ms": 24500
+          },
+          "core": {
+            "celsius": null,
+            "sampled_at_ms": 0
+          },
+          "expected": {
+            "phase": "Recovering",
+            "power_fraction": 0.8200000000000001,
+            "request_cooling": true,
+            "cool_since_ms": 4500,
+            "last_adjustment_ms": 24500,
+            "evaluated_at_ms": 24500
+          },
+          "fraction_scaled_target": {
+            "long_watts": 57,
+            "short_watts": 102
+          },
+          "expires_at_ms": 26000
+        },
+        {
+          "now": 26500,
+          "package": {
+            "celsius": 82,
+            "sampled_at_ms": 26500
+          },
+          "core": {
+            "celsius": null,
+            "sampled_at_ms": 0
+          },
+          "expected": {
+            "phase": "Recovering",
+            "power_fraction": 0.8400000000000001,
+            "request_cooling": true,
+            "cool_since_ms": 4500,
+            "last_adjustment_ms": 26500,
+            "evaluated_at_ms": 26500
+          },
+          "fraction_scaled_target": {
+            "long_watts": 58,
+            "short_watts": 105
+          },
+          "expires_at_ms": 28000
+        }
+      ]
+    },
+    {
+      "id": "freshness_boundary_missing_future_and_clock_regression",
+      "source": "package_core",
+      "options": {
+        "target_c": 90,
+        "warm_c": 87,
+        "recover_c": 86,
+        "freshness_ms": 2000,
+        "recovery_ms": 20000,
+        "adjustment_ms": 2000,
+        "minimum_fraction": 0.35,
+        "reduction": 0.1,
+        "warm_reduction": 0.1,
+        "recovery_step": 0.02
+      },
+      "steps": [
+        {
+          "now": 0,
+          "package": {
+            "celsius": 90,
+            "sampled_at_ms": 0
+          },
+          "core": {
+            "celsius": 91,
+            "sampled_at_ms": 0
+          },
+          "expected": {
+            "phase": "Hot",
+            "power_fraction": 0.9,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 0,
+            "evaluated_at_ms": 0
+          },
+          "fraction_scaled_target": {
+            "long_watts": 63,
+            "short_watts": 112
+          },
+          "expires_at_ms": 1500
+        },
+        {
+          "now": 2000,
+          "package": {
+            "celsius": 85,
+            "sampled_at_ms": 0
+          },
+          "core": {
+            "celsius": 85,
+            "sampled_at_ms": 0
+          },
+          "expected": {
+            "phase": "Recovering",
+            "power_fraction": 0.9,
+            "request_cooling": true,
+            "cool_since_ms": 2000,
+            "last_adjustment_ms": 0,
+            "evaluated_at_ms": 2000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 63,
+            "short_watts": 112
+          },
+          "expires_at_ms": 3500
+        },
+        {
+          "now": 2001,
+          "package": {
+            "celsius": 85,
+            "sampled_at_ms": 0
+          },
+          "core": {
+            "celsius": 85,
+            "sampled_at_ms": 0
+          },
+          "expected": {
+            "phase": "SensorFault",
+            "power_fraction": 0.9,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 0,
+            "evaluated_at_ms": 2001
+          },
+          "fraction_scaled_target": {
+            "long_watts": 63,
+            "short_watts": 112
+          },
+          "expires_at_ms": 3501
+        },
+        {
+          "now": 3000,
+          "package": {
+            "celsius": null,
+            "sampled_at_ms": 3000
+          },
+          "core": {
+            "celsius": 70,
+            "sampled_at_ms": 3000
+          },
+          "expected": {
+            "phase": "SensorFault",
+            "power_fraction": 0.9,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 0,
+            "evaluated_at_ms": 3000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 63,
+            "short_watts": 112
+          },
+          "expires_at_ms": 4500
+        },
+        {
+          "now": 4000,
+          "package": {
+            "celsius": 70,
+            "sampled_at_ms": 4001
+          },
+          "core": {
+            "celsius": 70,
+            "sampled_at_ms": 4000
+          },
+          "expected": {
+            "phase": "SensorFault",
+            "power_fraction": 0.9,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 0,
+            "evaluated_at_ms": 4000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 63,
+            "short_watts": 112
+          },
+          "expires_at_ms": 5500
+        },
+        {
+          "now": 5000,
+          "package": {
+            "celsius": 70,
+            "sampled_at_ms": 5000
+          },
+          "core": {
+            "celsius": 70,
+            "sampled_at_ms": 5000
+          },
+          "expected": {
+            "phase": "Recovering",
+            "power_fraction": 0.9,
+            "request_cooling": true,
+            "cool_since_ms": 5000,
+            "last_adjustment_ms": 0,
+            "evaluated_at_ms": 5000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 63,
+            "short_watts": 112
+          },
+          "expires_at_ms": 6500
+        },
+        {
+          "now": 4500,
+          "package": {
+            "celsius": 70,
+            "sampled_at_ms": 4500
+          },
+          "core": {
+            "celsius": 70,
+            "sampled_at_ms": 4500
+          },
+          "expected": {
+            "phase": "SensorFault",
+            "power_fraction": 0.9,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 0,
+            "evaluated_at_ms": 4500
+          },
+          "fraction_scaled_target": {
+            "long_watts": 63,
+            "short_watts": 112
+          },
+          "expires_at_ms": 6000
+        },
+        {
+          "now": 6000,
+          "package": {
+            "celsius": 70,
+            "sampled_at_ms": 6000
+          },
+          "core": {
+            "celsius": 70,
+            "sampled_at_ms": 6000
+          },
+          "expected": {
+            "phase": "Recovering",
+            "power_fraction": 0.9,
+            "request_cooling": true,
+            "cool_since_ms": 6000,
+            "last_adjustment_ms": 0,
+            "evaluated_at_ms": 6000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 63,
+            "short_watts": 112
+          },
+          "expires_at_ms": 7500
+        }
+      ]
+    },
+    {
+      "id": "hardware_max_and_exact_hysteresis",
+      "source": "package_core",
+      "options": {
+        "target_c": 90,
+        "warm_c": 87,
+        "recover_c": 86,
+        "freshness_ms": 2000,
+        "recovery_ms": 20000,
+        "adjustment_ms": 2000,
+        "minimum_fraction": 0.35,
+        "reduction": 0.1,
+        "warm_reduction": 0.1,
+        "recovery_step": 0.02
+      },
+      "steps": [
+        {
+          "now": 0,
+          "package": {
+            "celsius": 90,
+            "sampled_at_ms": 0
+          },
+          "core": {
+            "celsius": 65,
+            "sampled_at_ms": 0
+          },
+          "expected": {
+            "phase": "Hot",
+            "power_fraction": 0.9,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 0,
+            "evaluated_at_ms": 0
+          },
+          "fraction_scaled_target": {
+            "long_watts": 63,
+            "short_watts": 112
+          },
+          "expires_at_ms": 1500
+        },
+        {
+          "now": 2000,
+          "package": {
+            "celsius": 86,
+            "sampled_at_ms": 2000
+          },
+          "core": {
+            "celsius": 86,
+            "sampled_at_ms": 2000
+          },
+          "expected": {
+            "phase": "Recovering",
+            "power_fraction": 0.9,
+            "request_cooling": true,
+            "cool_since_ms": 2000,
+            "last_adjustment_ms": 0,
+            "evaluated_at_ms": 2000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 63,
+            "short_watts": 112
+          },
+          "expires_at_ms": 3500
+        },
+        {
+          "now": 22000,
+          "package": {
+            "celsius": 86,
+            "sampled_at_ms": 22000
+          },
+          "core": {
+            "celsius": 86,
+            "sampled_at_ms": 22000
+          },
+          "expected": {
+            "phase": "Recovering",
+            "power_fraction": 0.92,
+            "request_cooling": true,
+            "cool_since_ms": 2000,
+            "last_adjustment_ms": 22000,
+            "evaluated_at_ms": 22000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 64,
+            "short_watts": 115
+          },
+          "expires_at_ms": 23500
+        },
+        {
+          "now": 24000,
+          "package": {
+            "celsius": 86.00001,
+            "sampled_at_ms": 24000
+          },
+          "core": {
+            "celsius": 86,
+            "sampled_at_ms": 24000
+          },
+          "expected": {
+            "phase": "Recovering",
+            "power_fraction": 0.92,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 22000,
+            "evaluated_at_ms": 24000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 64,
+            "short_watts": 115
+          },
+          "expires_at_ms": 25500
+        },
+        {
+          "now": 26000,
+          "package": {
+            "celsius": 87,
+            "sampled_at_ms": 26000
+          },
+          "core": {
+            "celsius": 86,
+            "sampled_at_ms": 26000
+          },
+          "expected": {
+            "phase": "Warm",
+            "power_fraction": 0.92,
+            "request_cooling": true,
+            "cool_since_ms": null,
+            "last_adjustment_ms": 22000,
+            "evaluated_at_ms": 26000
+          },
+          "fraction_scaled_target": {
+            "long_watts": 64,
+            "short_watts": 115
+          },
+          "expires_at_ms": 27500
+        }
+      ]
+    }
+  ],
+  "grid_cases": [
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 50,
+        "short_watts": 60
+      },
+      "expected": {
+        "long_watts": 50,
+        "short_watts": 60
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 50,
+        "short_watts": 195
+      },
+      "expected": {
+        "long_watts": 50,
+        "short_watts": 195
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 135,
+        "short_watts": 195
+      },
+      "expected": {
+        "long_watts": 135,
+        "short_watts": 195
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 50,
+        "short_watts": 60
+      },
+      "expected": {
+        "long_watts": 50,
+        "short_watts": 60
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 54.25,
+        "short_watts": 107.25
+      },
+      "expected": {
+        "long_watts": 54,
+        "short_watts": 107
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 58.5,
+        "short_watts": 154.5
+      },
+      "expected": {
+        "long_watts": 58,
+        "short_watts": 154
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 62.75,
+        "short_watts": 62.75
+      },
+      "expected": {
+        "long_watts": 62,
+        "short_watts": 62
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 67,
+        "short_watts": 107.25
+      },
+      "expected": {
+        "long_watts": 67,
+        "short_watts": 107
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 71.25,
+        "short_watts": 154.5
+      },
+      "expected": {
+        "long_watts": 71,
+        "short_watts": 154
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 75.5,
+        "short_watts": 75.5
+      },
+      "expected": {
+        "long_watts": 75,
+        "short_watts": 75
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 79.75,
+        "short_watts": 107.25
+      },
+      "expected": {
+        "long_watts": 79,
+        "short_watts": 107
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 84,
+        "short_watts": 154.5
+      },
+      "expected": {
+        "long_watts": 84,
+        "short_watts": 154
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 88.25,
+        "short_watts": 88.25
+      },
+      "expected": {
+        "long_watts": 88,
+        "short_watts": 88
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 92.5,
+        "short_watts": 107.25
+      },
+      "expected": {
+        "long_watts": 92,
+        "short_watts": 107
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 96.75,
+        "short_watts": 154.5
+      },
+      "expected": {
+        "long_watts": 96,
+        "short_watts": 154
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 101,
+        "short_watts": 101
+      },
+      "expected": {
+        "long_watts": 101,
+        "short_watts": 101
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 105.25,
+        "short_watts": 107.25
+      },
+      "expected": {
+        "long_watts": 105,
+        "short_watts": 107
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 109.5,
+        "short_watts": 154.5
+      },
+      "expected": {
+        "long_watts": 109,
+        "short_watts": 154
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 113.75,
+        "short_watts": 113.75
+      },
+      "expected": {
+        "long_watts": 113,
+        "short_watts": 113
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 118,
+        "short_watts": 118
+      },
+      "expected": {
+        "long_watts": 118,
+        "short_watts": 118
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 122.25,
+        "short_watts": 154.5
+      },
+      "expected": {
+        "long_watts": 122,
+        "short_watts": 154
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 126.5,
+        "short_watts": 126.5
+      },
+      "expected": {
+        "long_watts": 126,
+        "short_watts": 126
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 130.75,
+        "short_watts": 130.75
+      },
+      "expected": {
+        "long_watts": 130,
+        "short_watts": 130
+      }
+    },
+    {
+      "id": "y7000p_step1",
+      "capability": {
+        "min_long": 50,
+        "max_long": 135,
+        "min_short": 60,
+        "max_short": 195,
+        "step": 1
+      },
+      "ceiling": {
+        "long_watts": 135,
+        "short_watts": 154.5
+      },
+      "expected": {
+        "long_watts": 135,
+        "short_watts": 154
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.1,
+        "short_watts": 0.2
+      },
+      "expected": {
+        "long_watts": 0.1,
+        "short_watts": 0.2
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.1,
+        "short_watts": 1.2
+      },
+      "expected": {
+        "long_watts": 0.1,
+        "short_watts": 1.2
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 1.1,
+        "short_watts": 1.2
+      },
+      "expected": {
+        "long_watts": 1.1,
+        "short_watts": 1.2
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.1,
+        "short_watts": 0.2
+      },
+      "expected": {
+        "long_watts": 0.1,
+        "short_watts": 0.2
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.15000000000000002,
+        "short_watts": 0.55
+      },
+      "expected": {
+        "long_watts": 0.1,
+        "short_watts": 0.5
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.2,
+        "short_watts": 0.8999999999999999
+      },
+      "expected": {
+        "long_watts": 0.2,
+        "short_watts": 0.8
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.25,
+        "short_watts": 0.25
+      },
+      "expected": {
+        "long_watts": 0.2,
+        "short_watts": 0.2
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.30000000000000004,
+        "short_watts": 0.55
+      },
+      "expected": {
+        "long_watts": 0.3,
+        "short_watts": 0.5
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.35,
+        "short_watts": 0.8999999999999999
+      },
+      "expected": {
+        "long_watts": 0.3,
+        "short_watts": 0.8
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.4,
+        "short_watts": 0.4
+      },
+      "expected": {
+        "long_watts": 0.4,
+        "short_watts": 0.4
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.44999999999999996,
+        "short_watts": 0.55
+      },
+      "expected": {
+        "long_watts": 0.4,
+        "short_watts": 0.5
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.5,
+        "short_watts": 0.8999999999999999
+      },
+      "expected": {
+        "long_watts": 0.5,
+        "short_watts": 0.8
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.55,
+        "short_watts": 0.55
+      },
+      "expected": {
+        "long_watts": 0.5,
+        "short_watts": 0.5
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.6,
+        "short_watts": 0.6
+      },
+      "expected": {
+        "long_watts": 0.6,
+        "short_watts": 0.6
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.65,
+        "short_watts": 0.8999999999999999
+      },
+      "expected": {
+        "long_watts": 0.6,
+        "short_watts": 0.8
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.7,
+        "short_watts": 0.7
+      },
+      "expected": {
+        "long_watts": 0.7,
+        "short_watts": 0.7
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.75,
+        "short_watts": 0.75
+      },
+      "expected": {
+        "long_watts": 0.7,
+        "short_watts": 0.7
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.7999999999999999,
+        "short_watts": 0.8999999999999999
+      },
+      "expected": {
+        "long_watts": 0.7,
+        "short_watts": 0.8
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.85,
+        "short_watts": 0.85
+      },
+      "expected": {
+        "long_watts": 0.8,
+        "short_watts": 0.8
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.9,
+        "short_watts": 0.9
+      },
+      "expected": {
+        "long_watts": 0.9,
+        "short_watts": 0.9
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 0.95,
+        "short_watts": 0.95
+      },
+      "expected": {
+        "long_watts": 0.9,
+        "short_watts": 0.9
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 1,
+        "short_watts": 1
+      },
+      "expected": {
+        "long_watts": 1,
+        "short_watts": 1
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 1.05,
+        "short_watts": 1.05
+      },
+      "expected": {
+        "long_watts": 1,
+        "short_watts": 1
+      }
+    },
+    {
+      "id": "decimal_step01",
+      "capability": {
+        "min_long": 0.1,
+        "max_long": 1.1,
+        "min_short": 0.2,
+        "max_short": 1.2,
+        "step": 0.1
+      },
+      "ceiling": {
+        "long_watts": 1.1,
+        "short_watts": 1.1
+      },
+      "expected": {
+        "long_watts": 1.1,
+        "short_watts": 1.1
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 5,
+        "short_watts": 5
+      },
+      "expected": {
+        "long_watts": 5,
+        "short_watts": 5
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 5,
+        "short_watts": 25
+      },
+      "expected": {
+        "long_watts": 5,
+        "short_watts": 25
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 20,
+        "short_watts": 25
+      },
+      "expected": {
+        "long_watts": 19,
+        "short_watts": 25
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 5,
+        "short_watts": 5
+      },
+      "expected": {
+        "long_watts": 5,
+        "short_watts": 5
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 5.75,
+        "short_watts": 10.7
+      },
+      "expected": {
+        "long_watts": 5,
+        "short_watts": 9
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 6.5,
+        "short_watts": 18.4
+      },
+      "expected": {
+        "long_watts": 5,
+        "short_watts": 17
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 7.25,
+        "short_watts": 7.25
+      },
+      "expected": {
+        "long_watts": 7,
+        "short_watts": 7
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 8,
+        "short_watts": 10.7
+      },
+      "expected": {
+        "long_watts": 7,
+        "short_watts": 9
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 8.75,
+        "short_watts": 18.4
+      },
+      "expected": {
+        "long_watts": 7,
+        "short_watts": 17
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 9.5,
+        "short_watts": 9.5
+      },
+      "expected": {
+        "long_watts": 9,
+        "short_watts": 9
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 10.25,
+        "short_watts": 10.7
+      },
+      "expected": {
+        "long_watts": 9,
+        "short_watts": 9
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 11,
+        "short_watts": 18.4
+      },
+      "expected": {
+        "long_watts": 11,
+        "short_watts": 17
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 11.75,
+        "short_watts": 11.75
+      },
+      "expected": {
+        "long_watts": 11,
+        "short_watts": 11
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 12.5,
+        "short_watts": 12.5
+      },
+      "expected": {
+        "long_watts": 11,
+        "short_watts": 11
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 13.25,
+        "short_watts": 18.4
+      },
+      "expected": {
+        "long_watts": 13,
+        "short_watts": 17
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 14,
+        "short_watts": 14
+      },
+      "expected": {
+        "long_watts": 13,
+        "short_watts": 13
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 14.75,
+        "short_watts": 14.75
+      },
+      "expected": {
+        "long_watts": 13,
+        "short_watts": 13
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 15.5,
+        "short_watts": 18.4
+      },
+      "expected": {
+        "long_watts": 15,
+        "short_watts": 17
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 16.25,
+        "short_watts": 16.25
+      },
+      "expected": {
+        "long_watts": 15,
+        "short_watts": 15
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 17,
+        "short_watts": 17
+      },
+      "expected": {
+        "long_watts": 17,
+        "short_watts": 17
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 17.75,
+        "short_watts": 18.4
+      },
+      "expected": {
+        "long_watts": 17,
+        "short_watts": 17
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 18.5,
+        "short_watts": 18.5
+      },
+      "expected": {
+        "long_watts": 17,
+        "short_watts": 17
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 19.25,
+        "short_watts": 19.25
+      },
+      "expected": {
+        "long_watts": 19,
+        "short_watts": 19
+      }
+    },
+    {
+      "id": "shifted_origins",
+      "capability": {
+        "min_long": 5,
+        "max_long": 20,
+        "min_short": 3,
+        "max_short": 25,
+        "step": 2
+      },
+      "ceiling": {
+        "long_watts": 20,
+        "short_watts": 20
+      },
+      "expected": {
+        "long_watts": 19,
+        "short_watts": 19
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 3.25,
+        "short_watts": 3.5
+      },
+      "expected": {
+        "long_watts": 3.25,
+        "short_watts": 3.5
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 3.25,
+        "short_watts": 13.5
+      },
+      "expected": {
+        "long_watts": 3.25,
+        "short_watts": 13.5
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 10.25,
+        "short_watts": 13.5
+      },
+      "expected": {
+        "long_watts": 10.25,
+        "short_watts": 13.5
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 3.25,
+        "short_watts": 3.5
+      },
+      "expected": {
+        "long_watts": 3.25,
+        "short_watts": 3.5
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 3.6,
+        "short_watts": 7
+      },
+      "expected": {
+        "long_watts": 3.25,
+        "short_watts": 7
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 3.95,
+        "short_watts": 10.5
+      },
+      "expected": {
+        "long_watts": 3.75,
+        "short_watts": 10.5
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 4.3,
+        "short_watts": 4.3
+      },
+      "expected": {
+        "long_watts": 3.75,
+        "short_watts": 4
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 4.65,
+        "short_watts": 7
+      },
+      "expected": {
+        "long_watts": 4.25,
+        "short_watts": 7
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 5,
+        "short_watts": 10.5
+      },
+      "expected": {
+        "long_watts": 4.75,
+        "short_watts": 10.5
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 5.35,
+        "short_watts": 5.35
+      },
+      "expected": {
+        "long_watts": 4.75,
+        "short_watts": 5
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 5.7,
+        "short_watts": 7
+      },
+      "expected": {
+        "long_watts": 5.25,
+        "short_watts": 7
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 6.05,
+        "short_watts": 10.5
+      },
+      "expected": {
+        "long_watts": 5.75,
+        "short_watts": 10.5
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 6.4,
+        "short_watts": 6.4
+      },
+      "expected": {
+        "long_watts": 5.75,
+        "short_watts": 6
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 6.75,
+        "short_watts": 7
+      },
+      "expected": {
+        "long_watts": 6.75,
+        "short_watts": 7
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 7.1,
+        "short_watts": 10.5
+      },
+      "expected": {
+        "long_watts": 6.75,
+        "short_watts": 10.5
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 7.45,
+        "short_watts": 7.45
+      },
+      "expected": {
+        "long_watts": 6.75,
+        "short_watts": 7
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 7.8,
+        "short_watts": 7.8
+      },
+      "expected": {
+        "long_watts": 7.25,
+        "short_watts": 7.5
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 8.15,
+        "short_watts": 10.5
+      },
+      "expected": {
+        "long_watts": 7.75,
+        "short_watts": 10.5
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 8.5,
+        "short_watts": 8.5
+      },
+      "expected": {
+        "long_watts": 8.25,
+        "short_watts": 8.5
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 8.85,
+        "short_watts": 8.85
+      },
+      "expected": {
+        "long_watts": 8.25,
+        "short_watts": 8.5
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 9.2,
+        "short_watts": 10.5
+      },
+      "expected": {
+        "long_watts": 8.75,
+        "short_watts": 10.5
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 9.55,
+        "short_watts": 9.55
+      },
+      "expected": {
+        "long_watts": 9.25,
+        "short_watts": 9.5
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 9.9,
+        "short_watts": 9.9
+      },
+      "expected": {
+        "long_watts": 9.25,
+        "short_watts": 9.5
+      }
+    },
+    {
+      "id": "half_step",
+      "capability": {
+        "min_long": 3.25,
+        "max_long": 10.25,
+        "min_short": 3.5,
+        "max_short": 13.5,
+        "step": 0.5
+      },
+      "ceiling": {
+        "long_watts": 10.25,
+        "short_watts": 10.5
+      },
+      "expected": {
+        "long_watts": 10.25,
+        "short_watts": 10.5
+      }
+    }
+  ],
+  "arbiter_cases": [
+    {
+      "id": "baseline",
+      "now": 1000,
+      "policy": 3,
+      "mode": 7,
+      "expires_at_ms": 3000,
+      "constraints": [],
+      "expected": {
+        "target": {
+          "long_watts": 70,
+          "short_watts": 125
+        },
+        "epoch": {
+          "policy": 3,
+          "mode": 7
+        },
+        "expires_at_ms": 3000
+      }
+    },
+    {
+      "id": "multiple_ceilings_and_earliest_deadline",
+      "now": 1000,
+      "policy": 3,
+      "mode": 7,
+      "expires_at_ms": 3000,
+      "constraints": [
+        {
+          "target": {
+            "long_watts": 63.8,
+            "short_watts": 116.9
+          },
+          "epoch": {
+            "policy": 3,
+            "mode": 7
+          },
+          "expires_at_ms": 2800
+        },
+        {
+          "target": {
+            "long_watts": 60.2,
+            "short_watts": 120
+          },
+          "epoch": {
+            "policy": 3,
+            "mode": 7
+          },
+          "expires_at_ms": 2100
+        }
+      ],
+      "expected": {
+        "target": {
+          "long_watts": 60,
+          "short_watts": 116
+        },
+        "epoch": {
+          "policy": 3,
+          "mode": 7
+        },
+        "expires_at_ms": 2100
+      }
+    },
+    {
+      "id": "exact_deadline_rejected",
+      "now": 1000,
+      "policy": 3,
+      "mode": 7,
+      "expires_at_ms": 1000,
+      "constraints": [],
+      "expected": null
+    },
+    {
+      "id": "expired_constraint_rejected",
+      "now": 1000,
+      "policy": 3,
+      "mode": 7,
+      "expires_at_ms": 3000,
+      "constraints": [
+        {
+          "target": {
+            "long_watts": 60,
+            "short_watts": 100
+          },
+          "epoch": {
+            "policy": 3,
+            "mode": 7
+          },
+          "expires_at_ms": 1000
+        }
+      ],
+      "expected": null
+    },
+    {
+      "id": "foreign_policy_rejected",
+      "now": 1000,
+      "policy": 3,
+      "mode": 7,
+      "expires_at_ms": 3000,
+      "constraints": [
+        {
+          "target": {
+            "long_watts": 60,
+            "short_watts": 100
+          },
+          "epoch": {
+            "policy": 2,
+            "mode": 7
+          },
+          "expires_at_ms": 2500
+        }
+      ],
+      "expected": null
+    },
+    {
+      "id": "foreign_mode_rejected",
+      "now": 1000,
+      "policy": 3,
+      "mode": 7,
+      "expires_at_ms": 3000,
+      "constraints": [
+        {
+          "target": {
+            "long_watts": 60,
+            "short_watts": 100
+          },
+          "epoch": {
+            "policy": 3,
+            "mode": 8
+          },
+          "expires_at_ms": 2500
+        }
+      ],
+      "expected": null
+    },
+    {
+      "id": "below_firmware_minimum_rejected",
+      "now": 1000,
+      "policy": 3,
+      "mode": 7,
+      "expires_at_ms": 3000,
+      "constraints": [
+        {
+          "target": {
+            "long_watts": 49,
+            "short_watts": 100
+          },
+          "epoch": {
+            "policy": 3,
+            "mode": 7
+          },
+          "expires_at_ms": 2500
+        }
+      ],
+      "expected": null
+    }
+  ]
+}

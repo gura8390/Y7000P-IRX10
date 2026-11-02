@@ -1,0 +1,50 @@
+Native adapter source and license notices
+
+Jiks is a GPL-3.0-only larger work. The explicitly marked source files below
+retain their MPL-2.0 terms. This notice does not replace their SPDX headers or
+the corresponding upstream licenses. No managed LHM, RAMSPDToolkit or
+NvAPIWrapper assembly is shipped or loaded by the Rust application.
+
+LibreHardwareMonitor-derived sensor source
+  Fixed reference: LenovoLegionToolkit-Team/LibreHardwareMonitor
+  commit ad760baba99c7c4ad6c86c5c57fb3ba766a7ee71
+  https://github.com/LenovoLegionToolkit-Team/LibreHardwareMonitor/tree/ad760baba99c7c4ad6c86c5c57fb3ba766a7ee71
+  Copyright (C) LibreHardwareMonitor and Contributors.
+  Partial Copyright (C) Michael Möller and Contributors.
+  License: LibreHardwareMonitor-MPL-2.0.txt.
+  Jiks corresponding files: crates/jiks-platform/src/intel_sensors.rs,
+  gpu_sensors.rs and intel_gpu.rs. Matching copies are in
+  licenses/NativeSensors-source/ in the binary archive.
+
+RAMSPDToolkit-derived sensor source
+  Fixed reference: Blacktempel/RAMSPDToolkit, RAMSPDToolkit-NDD 1.6.3
+  commit 69aab150784385dc2733a31f3332f646ab3c2e16
+  https://github.com/Blacktempel/RAMSPDToolkit/tree/69aab150784385dc2733a31f3332f646ab3c2e16
+  Copyright RAMSPDToolkit contributors, including Blacktempel.
+  License: RAMSPDToolkit-MPL-2.0.txt.
+  Jiks corresponding file: crates/jiks-platform/src/memory_sensors.rs.
+  A matching copy is in licenses/NativeSensors-source/ in the binary archive.
+  The separately embedded, unmodified PawnIO modules retain their LGPL-2.1-or-later
+  notices and corresponding Pawn source under licenses/PawnIO-source/.
+
+NvAPIWrapper protocol reference
+  Fixed reference: LenovoLegionToolkit-Team/NvAPIWrapper, LLT.NvAPIWrapper.Net
+  commit 0bc0ff2ef72dec39a8882c0d2b4259bc0c6448bc
+  https://github.com/LenovoLegionToolkit-Team/NvAPIWrapper/tree/0bc0ff2ef72dec39a8882c0d2b4259bc0c6448bc
+  Copyright (C) 2017-2020 Soroush Falahati and subsequent contributors.
+  Upstream license: NvAPIWrapper-LGPL-3.0.txt (incorporates GPL version 3,
+  included as the application LICENSE). This reference is LGPL, not MIT.
+  Jiks protocol/ABI implementations are available in the source repository as
+  crates/jiks-platform/src/gpu.rs, gpu_status.rs, gpu_pstate.rs and nvapi_native.rs;
+  matching copies are included under licenses/NvAPI-protocol-source/.
+  The wrapper DLL and NVIDIA driver binaries are not redistributed.
+
+Corresponding Jiks source
+  Repository: https://github.com/gura8390/Y7000P-IRX10
+  See package-manifest.json source_revision for the exact commit. The source
+  tree, Cargo.lock, build scripts and the copied source files identify the
+  reviewed inputs. Source copies in an archive must come from that frozen tree;
+  an archive from a different revision must not reuse its source identity.
+
+The three upstream license texts are unmodified. source-manifest.json records
+their immutable URLs, Git-blob SHA-1 and SHA-256; it contains no local paths.

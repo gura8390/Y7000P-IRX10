@@ -1,0 +1,10 @@
+# Preserve the reviewed compilation-input bytes, including existing CRLF files.
+# The parent C# repository uses text=auto; normalization would change their hashes.
+* -text
+# Fixed signed modules must remain byte-identical through every checkout.
+/crates/jiks-platform/resources/pawnio/IntelMSR.bin binary
+/crates/jiks-platform/resources/pawnio/SmbusI801.bin binary
+/crates/jiks-platform/resources/pawnio/SmbusIntelSkylakeIMC.bin binary
+# The upstream Git-blob hashes in source-manifest.json cover exact source bytes.
+/crates/jiks-platform/resources/pawnio/source/** -text
+/licenses/** -text

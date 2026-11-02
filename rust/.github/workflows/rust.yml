@@ -1,0 +1,47 @@
+name: Rust native build
+on:
+  workflow_dispatch:
+  push:
+    branches: [rust-rewrite]
+    paths: ['rust/**', '.github/workflows/rust.yml']
+  pull_request:
+    paths: ['rust/**', '.github/workflows/rust.yml']
+permissions:
+  contents: read
+jobs:
+  windows-msvc:
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Windows SDK environment
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$installation) { throw 'Visual Studio C++ build tools not found.' }
+          Import-Module (Join-Path $installation 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $installation -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          $env:PATH -split ';' | Where-Object { $_ } | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          foreach ($name in @('LIB', 'INCLUDE', 'LIBPATH')) { "$name=$([Environment]::GetEnvironmentVariable($name))" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
+      - name: Pure and temporary-directory tests
+        run: ./scripts/cargo.ps1 test --workspace --locked --target x86_64-pc-windows-msvc
+      - name: Release build (never launch)
+        run: |
+          $env:CARGO_ENCODED_RUSTFLAGS = '-Ctarget-feature=+crt-static'
+          ./scripts/build.ps1 -Target x86_64-pc-windows-msvc -SkipTests
+      - name: Clean source-pinned archive
+        run: |
+          ./scripts/dependency-licenses.ps1 -OutputFile ./target/DEPENDENCY_LICENSES.txt -Target x86_64-pc-windows-msvc
+          ./scripts/package.ps1 -Binary ./target/x86_64-pc-windows-msvc/release/Jiks.exe -OutputDirectory ./dist -DependencyLicenses ./target/DEPENDENCY_LICENSES.txt -Label "ci-$($env:GITHUB_SHA.Substring(0, 12))" -SourceRevision $env:GITHUB_SHA
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Jiks-ci-windows-x64
+          path: |
+            rust/dist/*.zip
+            rust/dist/*.sha256.json
+          if-no-files-found: error

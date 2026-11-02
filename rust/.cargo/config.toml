@@ -1,0 +1,3 @@
+# Use the installed Rust host toolchain by default. GNU cross-builds may select
+# x86_64-pc-windows-gnu with --target or CARGO_BUILD_TARGET. Shared configuration
+# deliberately contains no machine-specific linker paths.

@@ -1,0 +1,22 @@
+[package]
+name = "jiks-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "Jiks"
+path = "src/main.rs"
+
+[dependencies]
+jiks-core = { path = "../jiks-core" }
+jiks-platform = { path = "../jiks-platform" }
+jiks-store = { path = "../jiks-store" }
+jiks-runtime = { path = "../jiks-runtime" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+windows-sys.workspace = true
+windows.workspace = true
+image.workspace = true

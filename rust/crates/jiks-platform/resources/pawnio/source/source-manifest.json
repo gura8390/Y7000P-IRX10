@@ -1,0 +1,108 @@
+{
+  "schema": 1,
+  "project": "PawnIO.Modules",
+  "tag": "0.2.11",
+  "commit": "52a7e536dff3e53c96917a28caac5e0fa6510696",
+  "license": "LGPL-2.1-or-later",
+  "scope": "Unmodified source and complete include/build inputs for IntelMSR, SmbusI801 and SmbusIntelSkylakeIMC; unrelated module sources and the generic Pawn compiler are not redistributed.",
+  "files": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "bytes": 634,
+      "sha256": "e33ad14083e9fe3d5a668120d6baeeb996ed23e3c1ea3effab34ed66d8a32ef4",
+      "git_blob_sha1": "6313939c549edf811352cc41fb33d6f55a7638d1",
+      "source": "https://raw.githubusercontent.com/namazso/PawnIO.Modules/52a7e536dff3e53c96917a28caac5e0fa6510696/.github/workflows/ci.yml"
+    },
+    {
+      "path": "COPYING",
+      "bytes": 26530,
+      "sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551",
+      "git_blob_sha1": "4362b49151d7b34ef83b3067a8f9c9f877d72a0e",
+      "source": "https://raw.githubusercontent.com/namazso/PawnIO.Modules/52a7e536dff3e53c96917a28caac5e0fa6510696/COPYING"
+    },
+    {
+      "path": "include/core.inc",
+      "bytes": 1672,
+      "sha256": "3c3fdb0bb54d48792e5fadf4a17607023a35f25f1c006893a114342bac9d6aff",
+      "git_blob_sha1": "2e605631b2f2efb5718fbe499de31097e930eadc",
+      "source": "https://raw.githubusercontent.com/namazso/PawnIO.Modules/52a7e536dff3e53c96917a28caac5e0fa6510696/include/core.inc"
+    },
+    {
+      "path": "include/extra.inc",
+      "bytes": 3223,
+      "sha256": "4780c6ba2489264ff5982f2f9a5e2b7f4e8ec8951adfe8ef88e728592f1b2e94",
+      "git_blob_sha1": "76ad2270e18f679b9c315ebf83439f8c1fdb347f",
+      "source": "https://raw.githubusercontent.com/namazso/PawnIO.Modules/52a7e536dff3e53c96917a28caac5e0fa6510696/include/extra.inc"
+    },
+    {
+      "path": "include/native.inc",
+      "bytes": 14505,
+      "sha256": "b526bf69d66ebe00b22ea8609d9b6c2073ba6eeaf0730a2cf32477d0b64ee395",
+      "git_blob_sha1": "337a633f61400a28343055cdad641b4ed602439f",
+      "source": "https://raw.githubusercontent.com/namazso/PawnIO.Modules/52a7e536dff3e53c96917a28caac5e0fa6510696/include/native.inc"
+    },
+    {
+      "path": "include/ntstatus.inc",
+      "bytes": 211639,
+      "sha256": "bcb76abca4bc951f286074b59f64fb950e384a2204d4dfe6d1e0d03502d0bd2a",
+      "git_blob_sha1": "e8e01d35b73bfd444453c70261ac0f14af199f62",
+      "source": "https://raw.githubusercontent.com/namazso/PawnIO.Modules/52a7e536dff3e53c96917a28caac5e0fa6510696/include/ntstatus.inc"
+    },
+    {
+      "path": "include/pawnio.inc",
+      "bytes": 1765,
+      "sha256": "0809f5964d7707272398b212879078f62e08bc579a3def0283a1a059cf9e72a4",
+      "git_blob_sha1": "464f289d1a52ecedd2fd85c329ac48151d11d1ee",
+      "source": "https://raw.githubusercontent.com/namazso/PawnIO.Modules/52a7e536dff3e53c96917a28caac5e0fa6510696/include/pawnio.inc"
+    },
+    {
+      "path": "include/registry.inc",
+      "bytes": 18132,
+      "sha256": "ef33b339849f949b07792936f749de8eca1fa72b4348096c5b644b364e0870ad",
+      "git_blob_sha1": "1d1d66279835f285752f3b4e3b7a72897eac8d6b",
+      "source": "https://raw.githubusercontent.com/namazso/PawnIO.Modules/52a7e536dff3e53c96917a28caac5e0fa6510696/include/registry.inc"
+    },
+    {
+      "path": "include/util.inc",
+      "bytes": 6594,
+      "sha256": "ab390f9d9e244c2f7a5932f42a7e79194d100dc4a16549dbc31f9cf4932f3027",
+      "git_blob_sha1": "e97c31b04d90247e1181f644e3d0ebd266474d1d",
+      "source": "https://raw.githubusercontent.com/namazso/PawnIO.Modules/52a7e536dff3e53c96917a28caac5e0fa6510696/include/util.inc"
+    },
+    {
+      "path": "IntelMSR.p",
+      "bytes": 4757,
+      "sha256": "f3d9c573091fa844805ea8fcccd49304319491c51c7f7315e68935c4657ab0ad",
+      "git_blob_sha1": "e83d9238fe51a9ec868ac0f202f8ca91c8b03850",
+      "source": "https://raw.githubusercontent.com/namazso/PawnIO.Modules/52a7e536dff3e53c96917a28caac5e0fa6510696/IntelMSR.p"
+    },
+    {
+      "path": "README.md",
+      "bytes": 341,
+      "sha256": "4fe9bf550c50819ec563d3c18f0fb4770c2ad78d03f882bb9c6e8153314a87a0",
+      "git_blob_sha1": "430af1e51a0202f40ee92a55a9239a29cf244487",
+      "source": "https://raw.githubusercontent.com/namazso/PawnIO.Modules/52a7e536dff3e53c96917a28caac5e0fa6510696/README.md"
+    },
+    {
+      "path": "sleepmode.inc",
+      "bytes": 1250,
+      "sha256": "77b022c2c1ad79d8aeb940dccfe28a5f5cb4384400cef3634f30cf827344e0cd",
+      "git_blob_sha1": "44f2e84f26ed82938333990985bd6df8957477f5",
+      "source": "https://raw.githubusercontent.com/namazso/PawnIO.Modules/52a7e536dff3e53c96917a28caac5e0fa6510696/sleepmode.inc"
+    },
+    {
+      "path": "SmbusI801.p",
+      "bytes": 33280,
+      "sha256": "fb4e3575fb27f3a5ce0c607ac4e1558f948ab08fd98b8a63cf5072da9e8d6c41",
+      "git_blob_sha1": "500ad7e37f1c94571e64fb56f60219e88dfef676",
+      "source": "https://raw.githubusercontent.com/namazso/PawnIO.Modules/52a7e536dff3e53c96917a28caac5e0fa6510696/SmbusI801.p"
+    },
+    {
+      "path": "SmbusIntelSkylakeIMC.p",
+      "bytes": 12424,
+      "sha256": "fe3e414d78d1f12d383902a3e9f586c451b88481e299ef3145e18820b965e4e2",
+      "git_blob_sha1": "57d7ccad86c3c53d47d474413aa3a46bd284c461",
+      "source": "https://raw.githubusercontent.com/namazso/PawnIO.Modules/52a7e536dff3e53c96917a28caac5e0fa6510696/SmbusIntelSkylakeIMC.p"
+    }
+  ]
+}

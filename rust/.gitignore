@@ -1,0 +1,7 @@
+/target/
+*.pdb
+*.log
+/scripts/build.local.ps1
+/dist/
+/.benchmark-local/
+/assets/fonts/
