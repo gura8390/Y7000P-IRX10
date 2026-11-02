@@ -1,0 +1,37 @@
+[
+  {
+    "package": "BlackSharp.Core",
+    "version": "1.2.2",
+    "repository": "https://github.com/Blacktempel/BlackSharp",
+    "commit": "ee9cdfeefcfee0f5c4c9fb8919dcce5f89bce7cc",
+    "sourceAsset": "Y7000P-IRX10-DependencySources-2.34.0.3.zip"
+  },
+  {
+    "package": "DiskInfoToolkit",
+    "version": "2.2.1",
+    "repository": "https://github.com/Blacktempel/DiskInfoToolkit",
+    "commit": "87ffc498301c92ef61d2b8c3066928bf4cf51409",
+    "sourceAsset": "Y7000P-IRX10-DependencySources-2.34.0.3.zip"
+  },
+  {
+    "package": "LLT.LibreHardwareMonitorLib",
+    "version": "1.0.7-pre.27",
+    "repository": "https://github.com/LenovoLegionToolkit-Team/LibreHardwareMonitor",
+    "commit": "ad760baba99c7c4ad6c86c5c57fb3ba766a7ee71",
+    "sourceAsset": "Y7000P-IRX10-DependencySources-2.34.0.3.zip"
+  },
+  {
+    "package": "LLT.WindowsDisplayAPI",
+    "version": "1.3.17-pre.38",
+    "repository": "https://github.com/LenovoLegionToolkit-Team/WindowsDisplayAPI",
+    "commit": "5905022a0acdb3801e6ac2405219207b5d296899",
+    "sourceAsset": "Y7000P-IRX10-DependencySources-2.34.0.3.zip"
+  },
+  {
+    "package": "RAMSPDToolkit-NDD",
+    "version": "1.6.3",
+    "repository": "https://github.com/Blacktempel/RAMSPDToolkit",
+    "commit": "69aab150784385dc2733a31f3332f646ab3c2e16",
+    "sourceAsset": "Y7000P-IRX10-DependencySources-2.34.0.3.zip"
+  }
+]

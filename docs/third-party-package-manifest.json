@@ -1,0 +1,1356 @@
+[
+  {
+    "package": "Autofac",
+    "version": "9.0.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/autofac/Autofac",
+    "commit": "17ccc0bb4eae00e1e409679462ef44ecfb875742",
+    "project": "https://autofac.org/",
+    "included": []
+  },
+  {
+    "package": "AvalonEdit",
+    "version": "6.3.1.120",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/icsharpcode/AvalonEdit.git",
+    "commit": "862415d51eddc9eac93f462dbc522ffbf929cd52",
+    "project": "http://www.avalonedit.net/",
+    "included": []
+  },
+  {
+    "package": "Ben.Demystifier",
+    "version": "0.4.1",
+    "license": "Apache-2.0",
+    "licenseUrl": "https://licenses.nuget.org/Apache-2.0",
+    "repository": "https://github.com/benaadams/Ben.Demystifier",
+    "commit": "ca0293534037c88f29a4d4460de6d9c62f4ee9ad",
+    "project": "https://github.com/benaadams/Ben.Demystifier",
+    "included": []
+  },
+  {
+    "package": "BlackSharp.Core",
+    "version": "1.2.2",
+    "license": "MPL-2.0",
+    "licenseUrl": "https://licenses.nuget.org/MPL-2.0",
+    "repository": "https://github.com/Blacktempel/BlackSharp",
+    "commit": "ee9cdfeefcfee0f5c4c9fb8919dcce5f89bce7cc",
+    "project": "https://github.com/Blacktempel/BlackSharp",
+    "included": []
+  },
+  {
+    "package": "CoordinateSharp",
+    "version": "3.4.1.1",
+    "license": "License.txt",
+    "licenseUrl": "https://aka.ms/deprecateLicenseUrl",
+    "repository": "https://github.com/Tronald/CoordinateSharp",
+    "commit": "",
+    "project": "https://github.com/Tronald/CoordinateSharp",
+    "included": [
+      "licenses/CoordinateSharp-3.4.1.1/License.txt"
+    ]
+  },
+  {
+    "package": "DiskInfoToolkit",
+    "version": "2.2.1",
+    "license": "MPL-2.0",
+    "licenseUrl": "https://licenses.nuget.org/MPL-2.0",
+    "repository": "https://github.com/Blacktempel/DiskInfoToolkit",
+    "commit": "87ffc498301c92ef61d2b8c3066928bf4cf51409",
+    "project": "https://github.com/Blacktempel/DiskInfoToolkit",
+    "included": []
+  },
+  {
+    "package": "HidSharp",
+    "version": "2.6.4",
+    "license": "LICENSE.txt",
+    "licenseUrl": "https://aka.ms/deprecateLicenseUrl",
+    "repository": "",
+    "commit": "",
+    "project": "https://software.seekye.com/hidsharp",
+    "included": [
+      "licenses/HidSharp-2.6.4/LICENSE.txt"
+    ]
+  },
+  {
+    "package": "Humanizer",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.af",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "",
+    "commit": "",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.ar",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.az",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.bg",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.bn",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.ca",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.cs",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.da",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.de",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.el",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.es",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.fa",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.fi",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.fil",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.fr",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.he",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.hr",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.hu",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.hy",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.id",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.is",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.it",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.ja",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.ko",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "",
+    "commit": "",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.ku",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.lb",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.lt",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.lv",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.ms",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "",
+    "commit": "",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.mt",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.nb",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.nl",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.pl",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.pt",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.pt-BR",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.ro",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.ru",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.sk",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.sl",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.sr",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.sr-Latn",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.sv",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.th",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "",
+    "commit": "",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.tr",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.uk",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.uz-Cyrl-UZ",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.uz-Latn-UZ",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.vi",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.zh-CN",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.zh-Hans",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "Humanizer.Core.zh-Hant",
+    "version": "3.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Humanizr/Humanizer",
+    "commit": "6e54d3786f4c4fe2cf665fa41d74a6e79bf9a85f",
+    "project": "https://github.com/Humanizr/Humanizer",
+    "included": []
+  },
+  {
+    "package": "LLT.LibreHardwareMonitorLib",
+    "version": "1.0.7-pre.27",
+    "license": "MPL-2.0",
+    "licenseUrl": "https://licenses.nuget.org/MPL-2.0",
+    "repository": "https://github.com/LenovoLegionToolkit-Team/LibreHardwareMonitor",
+    "commit": "ad760baba99c7c4ad6c86c5c57fb3ba766a7ee71",
+    "project": "https://github.com/LenovoLegionToolkit-Team/LibreHardwareMonitor",
+    "included": []
+  },
+  {
+    "package": "LLT.NvAPIWrapper.Net",
+    "version": "1.1.28-pre.42",
+    "license": "",
+    "licenseUrl": "",
+    "repository": "https://github.com/LenovoLegionToolkit-Team/NvAPIWrapper",
+    "commit": "0bc0ff2ef72dec39a8882c0d2b4259bc0c6448bc",
+    "project": "https://github.com/LenovoLegionToolkit-Team/NvAPIWrapper",
+    "included": []
+  },
+  {
+    "package": "LLT.PresentMonFps",
+    "version": "2.0.8-pre.12",
+    "license": "LICENSE",
+    "licenseUrl": "https://aka.ms/deprecateLicenseUrl",
+    "repository": "https://github.com/LenovoLegionToolkit-Team/PresentMonFps",
+    "commit": "14090bab95fc9264f3f761be47b1a126e78037f1",
+    "project": "https://github.com/LenovoLegionToolkit-Team/PresentMonFps",
+    "included": [
+      "licenses/LLT.PresentMonFps-2.0.8-pre.12/LICENSE"
+    ]
+  },
+  {
+    "package": "LLT.WindowsDisplayAPI",
+    "version": "1.3.17-pre.38",
+    "license": "LGPL-3.0-only",
+    "licenseUrl": "https://licenses.nuget.org/LGPL-3.0-only",
+    "repository": "https://github.com/LenovoLegionToolkit-Team/WindowsDisplayAPI",
+    "commit": "5905022a0acdb3801e6ac2405219207b5d296899",
+    "project": "https://github.com/LenovoLegionToolkit-Team/WindowsDisplayAPI",
+    "included": []
+  },
+  {
+    "package": "LLT.ZenStates-Core",
+    "version": "1.92.6-pre.18",
+    "license": "LICENSE",
+    "licenseUrl": "https://aka.ms/deprecateLicenseUrl",
+    "repository": "https://github.com/LenovoLegionToolkit-Team/ZenStates-Core",
+    "commit": "42be963de3bd6581d671b421eaf26dfa91fd9ead",
+    "project": "https://github.com/LenovoLegionToolkit-Team/ZenStates-Core",
+    "included": [
+      "licenses/LLT.ZenStates-Core-1.92.6-pre.18/LICENSE"
+    ]
+  },
+  {
+    "package": "ManagedNativeWifi",
+    "version": "2.7.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/emoacht/ManagedNativeWifi",
+    "commit": "6a3f66862eb7baeb74a5de4c67a04652de933412",
+    "project": "https://github.com/emoacht/ManagedNativeWifi",
+    "included": []
+  },
+  {
+    "package": "Markdig",
+    "version": "0.45.0",
+    "license": "BSD-2-Clause",
+    "licenseUrl": "https://licenses.nuget.org/BSD-2-Clause",
+    "repository": "https://github.com/xoofx/markdig",
+    "commit": "d47fbc757fcad7c55cfd05be303cd1449cd7d6f5",
+    "project": "https://github.com/xoofx/markdig",
+    "included": []
+  },
+  {
+    "package": "Markdig.Wpf",
+    "version": "0.5.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/Kryptos-FR/markdig.wpf.git",
+    "commit": "f172c1337eacd80f5fd138b1eb2547e62690b243",
+    "project": "https://github.com/Kryptos-FR/markdig-wpf",
+    "included": []
+  },
+  {
+    "package": "Microsoft.CodeAnalysis.Analyzers",
+    "version": "3.11.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/roslyn-analyzers",
+    "commit": "f2384e61845314d0e8ad74cc0fe67d1bd4e9f102",
+    "project": "https://github.com/dotnet/roslyn-analyzers",
+    "included": []
+  },
+  {
+    "package": "Microsoft.CodeAnalysis.Common",
+    "version": "5.0.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/roslyn",
+    "commit": "6c4a46a31302167b425d5e0a31ea83c9a9aa1d09",
+    "project": "https://github.com/dotnet/roslyn",
+    "included": []
+  },
+  {
+    "package": "Microsoft.CodeAnalysis.CSharp",
+    "version": "5.0.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/roslyn",
+    "commit": "6c4a46a31302167b425d5e0a31ea83c9a9aa1d09",
+    "project": "https://github.com/dotnet/roslyn",
+    "included": []
+  },
+  {
+    "package": "Microsoft.CodeAnalysis.CSharp.Scripting",
+    "version": "5.0.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/roslyn",
+    "commit": "6c4a46a31302167b425d5e0a31ea83c9a9aa1d09",
+    "project": "https://github.com/dotnet/roslyn",
+    "included": []
+  },
+  {
+    "package": "Microsoft.CodeAnalysis.Scripting.Common",
+    "version": "5.0.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/roslyn",
+    "commit": "6c4a46a31302167b425d5e0a31ea83c9a9aa1d09",
+    "project": "https://github.com/dotnet/roslyn",
+    "included": []
+  },
+  {
+    "package": "Microsoft.CSharp",
+    "version": "4.7.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "",
+    "commit": "",
+    "project": "https://github.com/dotnet/corefx",
+    "included": [
+      "licenses/Microsoft.CSharp-4.7.0/LICENSE.TXT"
+    ]
+  },
+  {
+    "package": "Microsoft.Diagnostics.NETCore.Client",
+    "version": "0.2.510501",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/diagnostics",
+    "commit": "8c08c89a0643d31db91e119b1adb463be3e0ffe5",
+    "project": "https://github.com/dotnet/diagnostics",
+    "included": []
+  },
+  {
+    "package": "Microsoft.Diagnostics.Tracing.TraceEvent",
+    "version": "3.1.28",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "",
+    "commit": "",
+    "project": "https://github.com/Microsoft/perfview",
+    "included": []
+  },
+  {
+    "package": "Microsoft.Extensions.DependencyInjection",
+    "version": "6.0.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/runtime",
+    "commit": "4822e3c3aa77eb82b2fb33c9321f923cf11ddde6",
+    "project": "https://dot.net/",
+    "included": [
+      "licenses/Microsoft.Extensions.DependencyInjection-6.0.0/LICENSE.TXT"
+    ]
+  },
+  {
+    "package": "Microsoft.Extensions.DependencyInjection.Abstractions",
+    "version": "6.0.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/runtime",
+    "commit": "4822e3c3aa77eb82b2fb33c9321f923cf11ddde6",
+    "project": "https://dot.net/",
+    "included": [
+      "licenses/Microsoft.Extensions.DependencyInjection.Abstractions-6.0.0/LICENSE.TXT"
+    ]
+  },
+  {
+    "package": "Microsoft.Extensions.Logging",
+    "version": "6.0.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/runtime",
+    "commit": "4822e3c3aa77eb82b2fb33c9321f923cf11ddde6",
+    "project": "https://dot.net/",
+    "included": [
+      "licenses/Microsoft.Extensions.Logging-6.0.0/LICENSE.TXT"
+    ]
+  },
+  {
+    "package": "Microsoft.Extensions.Logging.Abstractions",
+    "version": "6.0.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/runtime",
+    "commit": "4822e3c3aa77eb82b2fb33c9321f923cf11ddde6",
+    "project": "https://dot.net/",
+    "included": [
+      "licenses/Microsoft.Extensions.Logging.Abstractions-6.0.0/LICENSE.TXT"
+    ]
+  },
+  {
+    "package": "Microsoft.Extensions.Options",
+    "version": "6.0.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/runtime",
+    "commit": "4822e3c3aa77eb82b2fb33c9321f923cf11ddde6",
+    "project": "https://dot.net/",
+    "included": [
+      "licenses/Microsoft.Extensions.Options-6.0.0/LICENSE.TXT"
+    ]
+  },
+  {
+    "package": "Microsoft.Extensions.Primitives",
+    "version": "6.0.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/runtime",
+    "commit": "4822e3c3aa77eb82b2fb33c9321f923cf11ddde6",
+    "project": "https://dot.net/",
+    "included": [
+      "licenses/Microsoft.Extensions.Primitives-6.0.0/LICENSE.TXT"
+    ]
+  },
+  {
+    "package": "Microsoft.Win32.Registry",
+    "version": "5.0.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "git://github.com/dotnet/runtime",
+    "commit": "cf258a14b70ad9069470a108f13765e0e5988f51",
+    "project": "https://github.com/dotnet/runtime",
+    "included": [
+      "licenses/Microsoft.Win32.Registry-5.0.0/LICENSE.TXT"
+    ]
+  },
+  {
+    "package": "Microsoft.Win32.SystemEvents",
+    "version": "10.0.3",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "c2435c3e0f46de784341ac3ed62863ce77e117b4",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "Microsoft.Xaml.Behaviors.Wpf",
+    "version": "1.1.31",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/microsoft/XamlBehaviorsWpf",
+    "commit": "302a27da21749b330a8b5807bc69f62f4372ff94",
+    "project": "https://github.com/Microsoft/XamlBehaviorsWpf",
+    "included": []
+  },
+  {
+    "package": "Mono.Posix.NETStandard",
+    "version": "1.0.0",
+    "license": "",
+    "licenseUrl": "https://go.microsoft.com/fwlink/?linkid=869050",
+    "repository": "",
+    "commit": "",
+    "project": "https://go.microsoft.com/fwlink/?linkid=869051",
+    "included": []
+  },
+  {
+    "package": "NAudio.Core",
+    "version": "2.2.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/naudio/NAudio",
+    "commit": "",
+    "project": "https://github.com/naudio/NAudio",
+    "included": []
+  },
+  {
+    "package": "NAudio.Wasapi",
+    "version": "2.2.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/naudio/NAudio",
+    "commit": "",
+    "project": "https://github.com/naudio/NAudio",
+    "included": []
+  },
+  {
+    "package": "NeoSmart.AsyncLock",
+    "version": "3.2.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/neosmart/AsyncLock",
+    "commit": "",
+    "project": "https://neosmart.net/blog/2017/asynclock-an-asyncawait-friendly-locking-library-for-c-and-net/",
+    "included": []
+  },
+  {
+    "package": "Newtonsoft.Json",
+    "version": "13.0.4",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/JamesNK/Newtonsoft.Json",
+    "commit": "4e13299d4b0ec96bd4df9954ef646bd2d1b5bf2a",
+    "project": "https://www.newtonsoft.com/json",
+    "included": [
+      "licenses/Newtonsoft.Json-13.0.4/LICENSE.md"
+    ]
+  },
+  {
+    "package": "Octokit",
+    "version": "14.0.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/octokit/octokit.net",
+    "commit": "7fa5b0fe4a18c9b981b21290c3ca9320b2d6415b",
+    "project": "https://github.com/octokit/octokit.net",
+    "included": []
+  },
+  {
+    "package": "PixiEditor.ColorPicker",
+    "version": "3.4.2.2",
+    "license": "LICENSE.md",
+    "licenseUrl": "https://aka.ms/deprecateLicenseUrl",
+    "repository": "https://github.com/PixiEditor/ColorPicker",
+    "commit": "a725c82844415722c813ff644e9ec9e1bcf420ee",
+    "project": "https://github.com/PixiEditor/ColorPicker",
+    "included": [
+      "licenses/PixiEditor.ColorPicker-3.4.2.2/LICENSE.md"
+    ]
+  },
+  {
+    "package": "PixiEditor.ColorPicker.Models",
+    "version": "1.0.10",
+    "license": "LICENSE.md",
+    "licenseUrl": "https://aka.ms/deprecateLicenseUrl",
+    "repository": "https://github.com/PixiEditor/ColorPicker",
+    "commit": "a725c82844415722c813ff644e9ec9e1bcf420ee",
+    "project": "https://github.com/PixiEditor/ColorPicker",
+    "included": [
+      "licenses/PixiEditor.ColorPicker.Models-1.0.10/LICENSE.md"
+    ]
+  },
+  {
+    "package": "PubSub",
+    "version": "4.0.2",
+    "license": "",
+    "licenseUrl": "",
+    "repository": "",
+    "commit": "",
+    "project": "http://github.com/upta/pubsub",
+    "included": []
+  },
+  {
+    "package": "RAMSPDToolkit-NDD",
+    "version": "1.6.3",
+    "license": "MPL-2.0",
+    "licenseUrl": "https://licenses.nuget.org/MPL-2.0",
+    "repository": "https://github.com/Blacktempel/RAMSPDToolkit",
+    "commit": "69aab150784385dc2733a31f3332f646ab3c2e16",
+    "project": "https://github.com/Blacktempel/RAMSPDToolkit",
+    "included": []
+  },
+  {
+    "package": "runtime.android-arm.runtime.native.System.IO.Ports",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "runtime.android-arm64.runtime.native.System.IO.Ports",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "runtime.android-x64.runtime.native.System.IO.Ports",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "runtime.android-x86.runtime.native.System.IO.Ports",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "runtime.linux-arm.runtime.native.System.IO.Ports",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "runtime.linux-arm64.runtime.native.System.IO.Ports",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "runtime.linux-bionic-arm64.runtime.native.System.IO.Ports",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "runtime.linux-bionic-x64.runtime.native.System.IO.Ports",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "runtime.linux-musl-arm.runtime.native.System.IO.Ports",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "runtime.linux-musl-arm64.runtime.native.System.IO.Ports",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "runtime.linux-musl-x64.runtime.native.System.IO.Ports",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "runtime.linux-x64.runtime.native.System.IO.Ports",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "runtime.maccatalyst-arm64.runtime.native.System.IO.Ports",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "runtime.maccatalyst-x64.runtime.native.System.IO.Ports",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "runtime.native.System.IO.Ports",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "runtime.osx-arm64.runtime.native.System.IO.Ports",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "runtime.osx-x64.runtime.native.System.IO.Ports",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "System.CodeDom",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "System.Collections.Immutable",
+    "version": "9.0.8",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/runtime",
+    "commit": "aae90fa09086a9be09dac83fa66542232c7269d8",
+    "project": "https://dot.net/",
+    "included": [
+      "licenses/System.Collections.Immutable-9.0.8/LICENSE.TXT"
+    ]
+  },
+  {
+    "package": "System.Diagnostics.DiagnosticSource",
+    "version": "10.0.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "b0f34d51fccc69fd334253924abd8d6853fad7aa",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "System.Diagnostics.EventLog",
+    "version": "10.0.3",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "c2435c3e0f46de784341ac3ed62863ce77e117b4",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "System.Drawing.Common",
+    "version": "7.0.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/runtime",
+    "commit": "d099f075e45d2aa6007a22b71b45a08758559f80",
+    "project": "https://dot.net/",
+    "included": [
+      "licenses/System.Drawing.Common-7.0.0/LICENSE.TXT"
+    ]
+  },
+  {
+    "package": "System.IO.Ports",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "System.Management",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "System.Reflection.Metadata",
+    "version": "9.0.8",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/runtime",
+    "commit": "aae90fa09086a9be09dac83fa66542232c7269d8",
+    "project": "https://dot.net/",
+    "included": [
+      "licenses/System.Reflection.Metadata-9.0.8/LICENSE.TXT"
+    ]
+  },
+  {
+    "package": "System.Reflection.TypeExtensions",
+    "version": "4.7.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "",
+    "commit": "",
+    "project": "https://github.com/dotnet/corefx",
+    "included": [
+      "licenses/System.Reflection.TypeExtensions-4.7.0/LICENSE.TXT"
+    ]
+  },
+  {
+    "package": "System.Runtime.CompilerServices.Unsafe",
+    "version": "6.1.2",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/maintenance-packages",
+    "commit": "f62ca0009b038cab4725a720f386623a969d73ad",
+    "project": "https://github.com/dotnet/maintenance-packages",
+    "included": []
+  },
+  {
+    "package": "System.Security.AccessControl",
+    "version": "6.0.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/runtime",
+    "commit": "189fbbd88d97dd6d65515ba2da05b62eab4e5039",
+    "project": "https://dot.net/",
+    "included": [
+      "licenses/System.Security.AccessControl-6.0.1/LICENSE.TXT"
+    ]
+  },
+  {
+    "package": "System.Security.Principal.Windows",
+    "version": "5.0.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "git://github.com/dotnet/runtime",
+    "commit": "cf258a14b70ad9069470a108f13765e0e5988f51",
+    "project": "https://github.com/dotnet/runtime",
+    "included": [
+      "licenses/System.Security.Principal.Windows-5.0.0/LICENSE.TXT"
+    ]
+  },
+  {
+    "package": "System.ServiceProcess.ServiceController",
+    "version": "10.0.3",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "c2435c3e0f46de784341ac3ed62863ce77e117b4",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "System.Text.Json",
+    "version": "9.0.8",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/runtime",
+    "commit": "aae90fa09086a9be09dac83fa66542232c7269d8",
+    "project": "https://dot.net/",
+    "included": [
+      "licenses/System.Text.Json-9.0.8/LICENSE.TXT"
+    ]
+  },
+  {
+    "package": "System.Threading.AccessControl",
+    "version": "10.0.13",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dotnet/dotnet",
+    "commit": "4099f83977f4d29604a9aeb971fb0a7bc1d5f699",
+    "project": "https://dot.net/",
+    "included": []
+  },
+  {
+    "package": "TaskScheduler",
+    "version": "2.12.2",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/dahall/taskscheduler",
+    "commit": "8f4803cf060b35f8299db26b45bfd6ff0f599c3c",
+    "project": "https://github.com/dahall/taskscheduler",
+    "included": []
+  },
+  {
+    "package": "WPF-UI",
+    "version": "2.1.0",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/lepoco/wpfui",
+    "commit": "00d742fcf167e6dedf7be92de34e4d1553a52967",
+    "project": "https://github.com/lepoco/wpfui",
+    "included": []
+  },
+  {
+    "package": "WpfScreenHelper",
+    "version": "2.1.1",
+    "license": "MIT",
+    "licenseUrl": "https://licenses.nuget.org/MIT",
+    "repository": "https://github.com/micdenny/WpfScreenHelper",
+    "commit": "4965d9fe58d5b444c04c95cf66adf63e54b5dfde",
+    "project": "https://github.com/micdenny/WpfScreenHelper",
+    "included": []
+  },
+  {
+    "package": "XamlAnimatedGif",
+    "version": "2.3.2",
+    "license": "Apache-2.0",
+    "licenseUrl": "https://licenses.nuget.org/Apache-2.0",
+    "repository": "https://github.com/XamlAnimatedGif/XamlAnimatedGif.git",
+    "commit": "3873ad7a35a7d296bc7cf1899234b2c714ba55a8",
+    "project": "https://github.com/XamlAnimatedGif/XamlAnimatedGif",
+    "included": []
+  }
+]
