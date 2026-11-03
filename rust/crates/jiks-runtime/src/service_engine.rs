@@ -2245,6 +2245,20 @@ impl Engine {
     /// Reap actual completion before admission. GUI and CLI requests get the
     /// available slot before periodic Fn reads; an unfinished ticket stays owned.
     fn poll_foreground(&mut self, received: Option<Command>) {
+        let mut command = received.or_else(|| match self.receiver.try_recv() {
+            Ok(command) => Some(command),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(Command::Shutdown { request_id: 0 }),
+        });
+        // Mark exit before reaping: a completed step must not dispatch the
+        // remainder of its plan or start a queued reader after exit was received.
+        if matches!(command, Some(Command::Shutdown { .. })) {
+            let command = command.take().unwrap();
+            let id = command.request_id();
+            if let Err(error) = self.process(command) {
+                self.finish(id, false, format!("{error:#}"));
+            }
+        }
         if let Err(error) = self.poll_write() {
             self.contain_fault(0, error);
         }
@@ -2253,11 +2267,6 @@ impl Engine {
         if let Err(error) = self.poll_read() {
             self.contain_fault(0, error);
         }
-        let command = received.or_else(|| match self.receiver.try_recv() {
-            Ok(command) => Some(command),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => Some(Command::Shutdown { request_id: 0 }),
-        });
         if let Some(command) = command {
             let id = command.request_id();
             if let Err(error) = self.process_foreground(command) {
@@ -2586,6 +2595,113 @@ mod lifecycle_tests {
         assert_eq!(f.log.lock().unwrap().len(), 1);
         assert!(f.engine.pending.is_none());
         assert!(!f.engine.state.lock().unwrap().results.back().unwrap().ok);
+    }
+    fn send_shutdown(f: &Fixture, already_received: bool) -> Option<Command> {
+        let command = Command::Shutdown { request_id: 516 };
+        if already_received {
+            Some(command)
+        } else {
+            f.sender.send(command).unwrap();
+            None
+        }
+    }
+    #[test]
+    fn foreground_shutdown_cancels_remaining_plan_and_queued_read_before_reaping() {
+        for already_received in [false, true] {
+            let mut f = Fixture::new();
+            let first = f.answer();
+            f.engine
+                .start_work(
+                    42,
+                    "fake plan",
+                    vec![A::ReadCpu, A::SetRawMode(3)],
+                    After::Hardware,
+                )
+                .unwrap();
+            f.engine
+                .enqueue_read("queued".into(), A::ReadFirmwareSensors, false);
+            // Answers are available so a wrong extra dispatch is observable in
+            // the log, rather than hidden by a missing-fixture-answer failure.
+            let _unexpected_next = f.answer();
+            let _unexpected_reader = f.answer();
+            *first.lock().unwrap() = Some(Ok(json!({})));
+            let shutdown = send_shutdown(&f, already_received);
+            f.engine.poll_foreground(shutdown);
+            assert_eq!(f.engine.shutdown, Some(516));
+            assert!(
+                matches!(f.log.lock().unwrap().as_slice(), [A::ReadCpu]),
+                "received shutdown allowed the next write or queued reader to start"
+            );
+            assert!(f.engine.pending.is_none() && f.engine.reading.is_none());
+            assert!(f.engine.read_queue.is_empty());
+            assert!(!f.engine.state.lock().unwrap().shutdown_ready);
+            assert!(
+                f.engine
+                    .state
+                    .lock()
+                    .unwrap()
+                    .results
+                    .iter()
+                    .any(|r| r.request_id == 42 && !r.ok)
+            );
+        }
+    }
+    #[test]
+    fn foreground_shutdown_keeps_unfinished_ticket_and_requires_both_cleanup_barriers() {
+        for already_received in [false, true] {
+            let mut f = Fixture::new();
+            let first = f.answer();
+            f.engine
+                .start_work(
+                    42,
+                    "fake plan",
+                    vec![A::ReadCpu, A::SetRawMode(3)],
+                    After::Hardware,
+                )
+                .unwrap();
+            let original = f.engine.pending.as_ref().unwrap().work.id;
+            let writer_barrier = f.answer();
+            let shutdown = send_shutdown(&f, already_received);
+            f.engine.poll_foreground(shutdown);
+            assert_eq!(f.engine.pending.as_ref().unwrap().work.id, original);
+            assert!(
+                f.engine
+                    .pending
+                    .as_ref()
+                    .unwrap()
+                    .cancel
+                    .load(std::sync::atomic::Ordering::Acquire)
+            );
+            assert!(!f.engine.poll_shutdown().unwrap());
+            assert!(matches!(f.log.lock().unwrap().as_slice(), [A::ReadCpu]));
+            *first.lock().unwrap() = Some(Ok(json!({})));
+            f.engine.poll_foreground(None);
+            assert!(f.engine.pending.is_none());
+            assert!(!f.engine.poll_shutdown().unwrap());
+            assert!(matches!(
+                f.engine.pending.as_ref().unwrap().action,
+                A::ShutdownWorker
+            ));
+            assert!(!f.engine.writer_closed);
+            f.engine.poll_foreground(None);
+            assert!(!f.engine.state.lock().unwrap().shutdown_ready);
+            *writer_barrier.lock().unwrap() =
+                Some(Ok(json!({"owner_released":true,"shutdown_confirmed":true})));
+            f.engine.poll_foreground(None);
+            assert!(f.engine.writer_closed);
+            let reader_barrier = f.answer();
+            assert!(!f.engine.poll_shutdown().unwrap());
+            assert!(f.engine.reader_close.is_some() && !f.engine.reader_closed);
+            assert!(!f.engine.state.lock().unwrap().shutdown_ready);
+            *reader_barrier.lock().unwrap() =
+                Some(Ok(json!({"owner_released":true,"shutdown_confirmed":true})));
+            assert!(f.engine.poll_shutdown().unwrap());
+            assert!(f.engine.state.lock().unwrap().shutdown_ready);
+            assert!(matches!(
+                f.log.lock().unwrap().as_slice(),
+                [A::ReadCpu, A::ShutdownWorker, A::ShutdownWorker]
+            ));
+        }
     }
     #[test]
     fn late_cpu_baseline_cannot_enable_a_controller() {
