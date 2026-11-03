@@ -100,6 +100,7 @@ pub enum ActionKind {
 }
 #[derive(Clone, Debug)]
 pub struct Action {
+    pub accessibility_role: &'static str,
     pub label: &'static str,
     pub capability: &'static str,
     pub kind: ActionKind,
@@ -140,6 +141,7 @@ fn field(
 }
 fn execute(label: &'static str, command: &'static str, fields: &[&'static str]) -> Action {
     Action {
+        accessibility_role: "execute",
         label: tr_static(label),
         capability: command,
         kind: ActionKind::Execute {
@@ -157,6 +159,7 @@ fn confirmed(
     message: &'static str,
 ) -> Action {
     Action {
+        accessibility_role: "confirmed",
         label: tr_static(label),
         capability: command,
         kind: ActionKind::Execute {
@@ -175,6 +178,7 @@ fn edit(
     capability: &'static str,
 ) -> Action {
     Action {
+        accessibility_role: "edit",
         label: tr_static(label),
         capability,
         kind: ActionKind::Structured {
@@ -186,6 +190,7 @@ fn edit(
 }
 fn doc(label: &'static str, document: &'static str) -> Action {
     Action {
+        accessibility_role: "document",
         label: tr_static(label),
         capability: "",
         kind: ActionKind::Document(document),
@@ -193,6 +198,7 @@ fn doc(label: &'static str, document: &'static str) -> Action {
 }
 fn cancel(fields: &[&'static str]) -> Action {
     Action {
+        accessibility_role: "cancel",
         label: tr_static("取消修改"),
         capability: "",
         kind: ActionKind::Cancel(fields.to_vec()),
@@ -1057,23 +1063,23 @@ fn tools(tab: usize, model: &UiModel) -> Vec<Section> {
         .filter(|field| !matches!(field.kind, FieldKind::ReadOnly))
         .map(|f| f.key)
         .collect();
-    let mut actions = vec![
-        execute(
-            "保存设置",
-            if tab == 5 {
-                "software.apply"
-            } else if tab == 7 {
-                "integration.apply"
-            } else {
-                "app.preferences.save"
-            },
-            &keys,
-        ),
-        cancel(&keys),
-    ];
+    let mut save = execute(
+        "保存设置",
+        if tab == 5 {
+            "software.apply"
+        } else if tab == 7 {
+            "integration.apply"
+        } else {
+            "app.preferences.save"
+        },
+        &keys,
+    );
+    save.accessibility_role = "save-settings";
+    let mut actions = vec![save, cancel(&keys)];
     match tab {
         0 => actions.extend([
             Action {
+                accessibility_role: "sensor-settings",
                 label: tr_static("传感器设置"),
                 capability: "",
                 kind: ActionKind::SensorSettings,

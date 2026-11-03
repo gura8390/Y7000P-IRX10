@@ -369,6 +369,12 @@ impl Editor {
                     ],
                     self.font,
                 );
+                a11y::annotate(
+                    h,
+                    &a11y::key(&self.mode.accessibility_key(), "field", &key),
+                    Some(&format!("{} {zone}", tr_static("分区"))),
+                    None,
+                );
                 SendMessageW(
                     h,
                     BM_SETCHECK,

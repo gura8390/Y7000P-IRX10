@@ -1,6 +1,6 @@
 //! A normal local inventory dialog. It consumes one cached metadata document;
 //! no Win32 message path performs a device query or filesystem operation.
-use super::native::*;
+use super::{a11y, native::*};
 use crate::ui_model::*;
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
@@ -78,6 +78,7 @@ pub(super) fn format_group(group: &Value, show_private: bool) -> String {
     output
 }
 pub(super) fn open(parent: HWND, bridge: UiBridge) -> Result<()> {
+    let _accessibility = a11y::UiThread::enter()?;
     unsafe {
         let class = wide("Jiks.Native.DeviceInformation");
         let wc = WNDCLASSW {
@@ -192,11 +193,75 @@ impl Dialog {
                 null(),
             );
             SendMessageW(hwnd, WM_SETFONT, self.font as usize, 1);
+            let en = super::i18n::language() == "en";
+            let label = |zh, english| if en { english } else { zh };
+            let (semantic_id, name, help) = match id {
+                GROUPS => (
+                    "device-information.groups",
+                    Some(label("设备信息分类", "Device information categories")),
+                    None,
+                ),
+                BODY => (
+                    "device-information.body",
+                    Some(label("设备信息内容", "Device information details")),
+                    Some(label(
+                        "只读。序列号与 MAC 地址默认隐藏；复制内容遵循隐私显示开关。",
+                        "Read-only. Serial numbers and MAC addresses are hidden by default; copied content follows the privacy toggle.",
+                    )),
+                ),
+                PRIVATE => (
+                    "device-information.reveal-private",
+                    Some(label(
+                        "显示序列号与 MAC 地址",
+                        "Show serial numbers and MAC addresses",
+                    )),
+                    Some(label(
+                        "勾选后，设备信息正文与复制内容将包含这些隐私值。",
+                        "When checked, the device details and copied content include these private values.",
+                    )),
+                ),
+                REFRESH => (
+                    "device-information.refresh",
+                    Some(label("刷新设备信息", "Refresh device information")),
+                    None,
+                ),
+                COPY => (
+                    "device-information.copy-current",
+                    Some(label(
+                        "复制本页设备信息",
+                        "Copy current device information page",
+                    )),
+                    None,
+                ),
+                COPY_ALL => (
+                    "device-information.copy-all",
+                    Some(label("复制全部设备信息", "Copy all device information")),
+                    None,
+                ),
+                CLOSE => (
+                    "device-information.close",
+                    Some(label("关闭设备信息窗口", "Close device information window")),
+                    None,
+                ),
+                26 => (
+                    "device-information.status",
+                    None,
+                    Some(label(
+                        "设备信息读取或复制状态",
+                        "Device information read or copy status",
+                    )),
+                ),
+                _ => return hwnd,
+            };
+            // Keep inventory text in the native read-only EDIT Value provider.
+            // No raw or unmasked metadata is copied into Name/HelpText.
+            a11y::annotate(hwnd, semantic_id, name, help);
             hwnd
         }
     }
     unsafe fn create(&mut self) {
         unsafe {
+            a11y::annotate(self.hwnd, "device-information.root", None, None);
             self.child(
                 "LISTBOX",
                 "",
@@ -467,5 +532,151 @@ mod tests {
         assert!(masked.contains("NVMe"));
         assert!(!masked.contains("SECRET123"));
         assert!(format_group(&group, true).contains("SECRET123"));
+    }
+    #[test]
+    fn never_visible_controls_expose_semantics_without_unmasking_native_inventory_value() {
+        let _language = super::super::i18n::TestLanguage::new("en");
+        let _accessibility = a11y::UiThread::enter().unwrap();
+        let (actions, _receiver) = std::sync::mpsc::sync_channel(4);
+        let model = std::sync::Arc::new(std::sync::Mutex::new(UiModel::default()));
+        let bridge = UiBridge::new(model.clone(), actions);
+        // Only a never-shown test-owned parent; production child creation and
+        // presentation run against an inert bridge, not a device coordinator.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                wide("Synthetic device information").as_ptr(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                800,
+                600,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null(),
+            )
+        };
+        assert!(!hwnd.is_null());
+        struct Hidden(Dialog);
+        impl Drop for Hidden {
+            fn drop(&mut self) {
+                unsafe {
+                    if IsWindow(self.0.hwnd) != 0 {
+                        DestroyWindow(self.0.hwnd);
+                    }
+                }
+            }
+        }
+        let mut fixture = Hidden(Dialog {
+            bridge,
+            hwnd,
+            font: unsafe { font(96, 15, false) },
+            brush: unsafe { CreateSolidBrush(paper()) },
+            dpi: 96,
+            groups: vec![
+                json!({"title":"Disk","rows":[{"label":"Serial","value":"SYNTHETIC_PRIVATE_SERIAL","sensitive":true}]}),
+            ],
+            selected: 0,
+            show_private: false,
+            revision: u64::MAX,
+            pending: None,
+            status: String::new(),
+            destroy: false,
+            started: Instant::now(),
+        });
+        unsafe {
+            fixture.0.create();
+            fixture.0.render_body();
+        }
+        let ids = [GROUPS, BODY, PRIVATE, REFRESH, COPY, COPY_ALL, CLOSE, 26];
+        let children = ids.map(|id| unsafe { GetDlgItem(hwnd, id) });
+        let initial = a11y::read_for_test(&children).unwrap();
+        assert_eq!(
+            a11y::read_for_test(&[hwnd]).unwrap()[0].id,
+            "device-information.root"
+        );
+        assert_eq!(unsafe { IsWindowVisible(hwnd) }, 0);
+        assert_eq!(initial[0].id, "device-information.groups");
+        assert_eq!(initial[0].name, "Device information categories");
+        assert_eq!(initial[1].id, "device-information.body");
+        assert_eq!(initial[1].name, "Device information details");
+        assert_eq!(
+            initial[1].control_type,
+            windows::Win32::UI::Accessibility::UIA_DocumentControlTypeId.0
+        );
+        assert_eq!(initial[1].read_only, Some(true));
+        assert!(
+            !initial[1]
+                .value
+                .as_ref()
+                .unwrap()
+                .contains("SYNTHETIC_PRIVATE_SERIAL")
+        );
+        assert!(initial[1].value.as_ref().unwrap().contains("••••••"));
+        assert_eq!(initial[2].id, "device-information.reveal-private");
+        assert_eq!(initial[2].toggle, Some(0));
+        assert_eq!(
+            initial[2].control_type,
+            windows::Win32::UI::Accessibility::UIA_CheckBoxControlTypeId.0
+        );
+        assert!(
+            !initial[3].enabled,
+            "pending refresh remains natively disabled"
+        );
+        assert_eq!(initial[3].id, "device-information.refresh");
+        assert!(initial[4].invoke && initial[5].invoke && initial[6].invoke);
+        assert_eq!(initial[4].id, "device-information.copy-current");
+        assert_eq!(initial[5].id, "device-information.copy-all");
+        assert_eq!(initial[6].id, "device-information.close");
+        assert_eq!(initial[7].id, "device-information.status");
+        assert!(
+            children
+                .iter()
+                .all(|child| unsafe { IsWindowVisible(*child) } == 0)
+        );
+        let pending = fixture.0.pending.unwrap();
+        model
+            .lock()
+            .unwrap()
+            .finish(pending, true, "Synthetic metadata complete");
+        unsafe {
+            fixture.0.tick();
+        }
+        fixture.0.groups = vec![
+            json!({"title":"Disk","rows":[{"label":"Serial","value":"SYNTHETIC_PRIVATE_SERIAL","sensitive":true}]}),
+        ];
+        unsafe {
+            SendMessageW(children[2], BM_SETCHECK, BST_CHECKED as usize, 0);
+            fixture.0.show_private =
+                SendMessageW(children[2], BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+            fixture.0.render_body();
+            text(children[7], "Synthetic status changed");
+        }
+        let updated =
+            a11y::read_for_test(&[children[1], children[3], children[7], children[2]]).unwrap();
+        assert_eq!(updated[0].name, "Device information details");
+        assert!(
+            updated[0]
+                .value
+                .as_ref()
+                .unwrap()
+                .contains("SYNTHETIC_PRIVATE_SERIAL")
+        );
+        assert!(
+            !updated[0].name.contains("SYNTHETIC_PRIVATE_SERIAL")
+                && !updated[0].help.contains("SYNTHETIC_PRIVATE_SERIAL")
+        );
+        assert!(
+            updated[1].enabled,
+            "native enabled state follows the fake backend result"
+        );
+        assert_eq!(
+            updated[2].name, "Synthetic status changed",
+            "status Name must follow actual text rather than a static override"
+        );
+        assert_eq!(updated[3].toggle, Some(1));
+        assert_eq!(unsafe { IsWindowVisible(hwnd) }, 0);
     }
 }

@@ -1,5 +1,6 @@
 //! GDI/native-control UI. Runtime messages are the only hardware boundary.
 mod background;
+mod a11y;
 mod catalog;
 mod device_information;
 mod editors;

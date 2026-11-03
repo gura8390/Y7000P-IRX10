@@ -1,4 +1,5 @@
 use super::{
+    a11y,
     catalog::{self, Action, ActionKind, FieldKind, Page},
     editors,
 };
@@ -112,6 +113,33 @@ const ID_TRAY_OPEN: usize = 300;
 const ID_TRAY_EXIT: usize = 301;
 const ID_TRAY_STATUS: usize = 302;
 const ID_QUICK: usize = 6000;
+const TOOL_KEYS: [&str; 8] = [
+    "behavior",
+    "appearance",
+    "power",
+    "display",
+    "smart-keys",
+    "software",
+    "updates",
+    "integration",
+];
+fn action_key(action: &Action) -> String {
+    let command = match &action.kind {
+        ActionKind::Execute {
+            command, fields, ..
+        } => format!("execute.{command}.{}", fields.join(",")),
+        ActionKind::Structured {
+            collection, fresh, ..
+        } => format!(
+            "edit.{collection}.{}",
+            if *fresh { "new" } else { "selected" }
+        ),
+        ActionKind::Document(document) => format!("document.{document}"),
+        ActionKind::SensorSettings => "sensor-settings".into(),
+        ActionKind::Cancel(fields) => format!("cancel.{}", fields.join(",")),
+    };
+    format!("{}.{}", action.accessibility_role, command)
+}
 static REQUEST: AtomicU64 = AtomicU64::new(1);
 fn navigation_target(page: Page, key: u32, ctrl: bool, shift: bool) -> Option<Page> {
     if !ctrl {
@@ -153,6 +181,41 @@ mod navigation_tests {
             Some(Page::About)
         );
         assert_eq!(navigation_target(Page::Dashboard, 0x31, false, false), None);
+    }
+    #[test]
+    fn semantic_control_ids_are_unique_for_all_main_pages_and_settings_categories() {
+        for page in Page::ALL {
+            for tab in 0..if page == Page::Settings { 8 } else { 1 } {
+                let scope = if page == Page::Settings {
+                    format!("main.settings.{}", TOOL_KEYS[tab])
+                } else {
+                    format!("main.{}", page.key())
+                };
+                let mut ids = BTreeSet::new();
+                for section in catalog::sections(page, tab, &UiModel::default()) {
+                    let section_key = section
+                        .fields
+                        .first()
+                        .map(|field| field.key.to_owned())
+                        .or_else(|| section.actions.first().map(action_key))
+                        .unwrap_or_else(|| "content".into());
+                    let section_scope = a11y::key(&scope, "section", &section_key);
+                    for field in section.fields {
+                        assert!(
+                            ids.insert(a11y::key(&scope, "field", field.key)),
+                            "duplicate field ID in {scope}: {}",
+                            field.key
+                        );
+                    }
+                    for action in section.actions {
+                        assert!(
+                            ids.insert(a11y::key(&section_scope, "action", &action_key(&action))),
+                            "duplicate action ID in {scope}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -688,6 +751,7 @@ struct App {
 }
 
 pub(super) fn run(bridge: UiBridge) -> Result<()> {
+    let _accessibility = a11y::UiThread::enter()?;
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let common = INITCOMMONCONTROLSEX {
@@ -808,6 +872,7 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
             drop(Box::from_raw(raw));
             bail!("无法创建机控窗口：{}", GetLastError());
         }
+        a11y::annotate(hwnd, "main", None, None);
         let instance_key = (*raw).borrow().bridge.instance_key.clone();
         if let Some(key) = instance_key {
             if SetPropW(hwnd, wide(&key).as_ptr(), 1usize as HANDLE) == 0 {
@@ -1253,6 +1318,13 @@ impl Drop for App {
     }
 }
 impl App {
+    fn accessibility_scope(&self) -> String {
+        if self.page == Page::Settings {
+            format!("main.settings.{}", TOOL_KEYS[self.tools_tab.min(7)])
+        } else {
+            format!("main.{}", self.page.key())
+        }
+    }
     fn s(&self, value: i32) -> i32 {
         value * self.dpi as i32 / 96
     }
@@ -1294,6 +1366,7 @@ impl App {
                 self.title_font,
             );
             self.fixed.push(brand);
+            a11y::annotate(brand, "main.brand", None, None);
             let sub = create(
                 self.hwnd,
                 "STATIC",
@@ -1304,6 +1377,7 @@ impl App {
                 self.body_font,
             );
             self.fixed.push(sub);
+            a11y::annotate(sub, "main.subtitle", None, None);
             for (index, page) in Page::ALL.iter().enumerate() {
                 let h = create(
                     self.hwnd,
@@ -1324,6 +1398,12 @@ impl App {
                     self.body_font,
                 );
                 self.fixed.push(h);
+                a11y::annotate(
+                    h,
+                    &a11y::key("main", "navigate", page.key()),
+                    Some(page.title()),
+                    None,
+                );
             }
             let nav = create(
                 self.hwnd,
@@ -1339,6 +1419,12 @@ impl App {
             }
             SendMessageW(nav, LB_SETITEMHEIGHT, 0, self.s(34) as isize);
             self.fixed.push(nav);
+            a11y::annotate(
+                nav,
+                "main.navigation",
+                Some(&super::i18n::tr("主导航")),
+                None,
+            );
             let exit = create(
                 self.hwnd,
                 "BUTTON",
@@ -1349,6 +1435,7 @@ impl App {
                 self.body_font,
             );
             self.fixed.push(exit);
+            a11y::annotate(exit, "main.exit", None, None);
             for (id, label) in [(ID_DEVICE, "设备"), (ID_LOG, "日志"), (ID_THEME, "主题")] {
                 let h = create(
                     self.hwnd,
@@ -1360,6 +1447,16 @@ impl App {
                     self.body_font,
                 );
                 self.fixed.push(h);
+                a11y::annotate(
+                    h,
+                    match id {
+                        ID_DEVICE => "main.device-information",
+                        ID_LOG => "main.logs",
+                        _ => "main.theme",
+                    },
+                    Some(&super::i18n::tr(label)),
+                    None,
+                );
             }
             self.title = create(
                 self.hwnd,
@@ -1371,8 +1468,10 @@ impl App {
                 self.title_font,
             );
             self.fixed.push(self.title);
+            a11y::annotate(self.title, "main.page-title", None, None);
             self.machine = create(self.hwnd, "STATIC", "", 0, 0, [0, 0, 0, 0], self.body_font);
             self.fixed.push(self.machine);
+            a11y::annotate(self.machine, "main.machine", None, None);
             self.notice = create(
                 self.hwnd,
                 "STATIC",
@@ -1383,6 +1482,7 @@ impl App {
                 self.body_font,
             );
             self.fixed.push(self.notice);
+            a11y::annotate(self.notice, "main.status", None, None);
             self.layout_fixed();
             self.rendering = false;
         }
@@ -1414,6 +1514,13 @@ impl App {
                 ShowWindow(
                     GetDlgItem(self.hwnd, ID_NAV as i32 + index as i32),
                     if compact_nav { SW_HIDE } else { SW_SHOWNA },
+                );
+                let page = Page::ALL[index];
+                a11y::annotate(
+                    GetDlgItem(self.hwnd, ID_NAV as i32 + index as i32),
+                    &a11y::key("main", "navigate", page.key()),
+                    Some(page.title()),
+                    (page == self.page).then(|| super::i18n::tr_static("当前页面")),
                 );
             }
             for index in 6..Page::ALL.len() {
@@ -1530,13 +1637,19 @@ impl App {
                     let translated = super::i18n::tr(title);
                     let title = translated.as_ref();
                     let short = title.chars().take(2).collect::<String>();
-                    self.placed(
+                    let button = self.placed(
                         "BUTTON",
                         if nav_width < 100 { &short } else { title },
                         BS_OWNERDRAW as u32 | WS_TABSTOP,
                         ID_TOOL_NAV + index as u16,
                         [212, 124 + index as i32 * 42, nav_width, 32],
                         self.body_font,
+                    );
+                    a11y::annotate(
+                        button,
+                        &a11y::key("main.settings", "category", TOOL_KEYS[index]),
+                        Some(title),
+                        (index == self.tools_tab).then(|| super::i18n::tr_static("当前页面")),
                     );
                 }
                 content_origin = 212 + nav_width + 20;
@@ -1554,7 +1667,16 @@ impl App {
                     }
                     let mut group_y = pair_y;
                     self.column_x = 212 + column as i32 * (width / columns as i32);
-                    self.label(&group.title, group_y, width / columns as i32 - 12, true, 28);
+                    let heading =
+                        self.label(&group.title, group_y, width / columns as i32 - 12, true, 28);
+                    if let Some(first) = group.metrics.first() {
+                        a11y::annotate(
+                            heading,
+                            &a11y::key("main.dashboard", "group", &first.key),
+                            None,
+                            None,
+                        );
+                    }
                     group_y += 34;
                     for metric in group.metrics {
                         let h = self.label(
@@ -1563,6 +1685,12 @@ impl App {
                             width / columns as i32 - 12,
                             false,
                             28,
+                        );
+                        a11y::annotate(
+                            h,
+                            &a11y::key("main.dashboard", "metric", &metric.key),
+                            None,
+                            None,
                         );
                         self.metrics.push((h, metric.key));
                         group_y += 30;
@@ -1595,6 +1723,12 @@ impl App {
                         false,
                         28,
                     );
+                    a11y::annotate(
+                        h,
+                        &a11y::key("main.battery", "metric", &metric.key),
+                        None,
+                        None,
+                    );
                     self.metrics.push((h, metric.key.clone()));
                     y += 30;
                 }
@@ -1624,9 +1758,28 @@ impl App {
                 }
                 let label_width = if width < 550 { 145 } else { 205 };
                 let editor_x = self.column_x + label_width + 12;
-                self.label(&section.title, y, width, true, 30);
+                let section_key = section
+                    .fields
+                    .first()
+                    .map(|field| field.key.to_owned())
+                    .or_else(|| section.actions.first().map(action_key))
+                    .unwrap_or_else(|| "content".into());
+                let section_scope = a11y::key(&self.accessibility_scope(), "section", &section_key);
+                let heading = self.label(&section.title, y, width, true, 30);
+                a11y::annotate(
+                    heading,
+                    &a11y::key(&section_scope, "text", "title"),
+                    None,
+                    None,
+                );
                 y += 38;
-                self.label(section.hint, y, width, false, 44);
+                let hint = self.label(section.hint, y, width, false, 44);
+                a11y::annotate(
+                    hint,
+                    &a11y::key(&section_scope, "text", "description"),
+                    None,
+                    None,
+                );
                 y += 51;
                 for spec in section.fields {
                     let field_label = if let Some(range) = model.ranges.get(spec.key) {
@@ -1637,7 +1790,13 @@ impl App {
                     } else {
                         spec.label.into()
                     };
-                    self.label(&field_label, y + 6, label_width, false, 28);
+                    let label = self.label(&field_label, y + 6, label_width, false, 28);
+                    a11y::annotate(
+                        label,
+                        &a11y::key(&self.accessibility_scope(), "label", spec.key),
+                        None,
+                        None,
+                    );
                     let value = self
                         .drafts
                         .get(spec.key)
@@ -1750,6 +1909,22 @@ impl App {
                             (h, BindingKind::Choice(options))
                         }
                     };
+                    let help = model
+                        .capabilities
+                        .get(spec.key)
+                        .filter(|cap| !cap.available)
+                        .map(|cap| cap.reason.clone())
+                        .or_else(|| {
+                            (!spec.capability.is_empty() && !model.can(spec.capability))
+                                .then(|| model.unavailable_reason(spec.capability))
+                        })
+                        .filter(|reason| !reason.is_empty());
+                    a11y::annotate(
+                        hwnd,
+                        &a11y::key(&self.accessibility_scope(), "field", spec.key),
+                        Some(spec.label),
+                        help.as_deref(),
+                    );
                     EnableWindow(
                         hwnd,
                         if model
@@ -1782,6 +1957,12 @@ impl App {
                             self.body_font,
                         );
                         EnableWindow(browse, IsWindowEnabled(hwnd));
+                        a11y::annotate(
+                            browse,
+                            &a11y::key(&self.accessibility_scope(), "browse", spec.key),
+                            Some(&format!("{} · {}", spec.label, super::i18n::tr("浏览…"))),
+                            None,
+                        );
                         self.pickers.insert(picker_id, (spec.key.into(), kind));
                     }
                     y += row_height;
@@ -1806,6 +1987,14 @@ impl App {
                         self.body_font,
                     );
                     let available = action.capability.is_empty() || model.can(action.capability);
+                    a11y::annotate(
+                        h,
+                        &a11y::key(&section_scope, "action", &action_key(&action)),
+                        None,
+                        (!available)
+                            .then(|| model.unavailable_reason(action.capability))
+                            .as_deref(),
+                    );
                     EnableWindow(h, available as i32);
                     if !available {
                         let reason = model.unavailable_reason(action.capability);
@@ -1856,7 +2045,10 @@ impl App {
                 self.machine,
                 &format!("{}  ·  {}", model.machine, model.version),
             );
-            text(self.notice, &model.notice);
+            text(
+                self.notice,
+                a11y::diagnostic().as_deref().unwrap_or(&model.notice),
+            );
             InvalidateRect(self.hwnd, null(), 1);
         }
     }

@@ -1,7 +1,7 @@
 //! A live, non-activating status view. The parent owns visibility subscriptions
 //! and calls sync on its UI tick. This module only presents completed UI data.
 use super::{
-    i18n,
+    a11y, i18n,
     native::{accent, font, ink, line, paper, wide},
 };
 use crate::ui_model::UiModel;
@@ -442,6 +442,24 @@ struct State {
     body_text: String,
 }
 impl State {
+    fn annotate_controls(&self, hwnd: HWND) {
+        a11y::annotate(hwnd, "status-popup.root", None, None);
+        a11y::annotate(
+            self.body,
+            "status-popup.body",
+            Some(label("本机状态详情", "Local status details")),
+            Some(label(
+                "只读。可选择和复制文本；破折号表示未知或读取已过期。",
+                "Read-only. Text can be selected and copied; a dash means unknown or stale.",
+            )),
+        );
+        a11y::annotate(
+            self.close,
+            "status-popup.close",
+            Some(label("关闭本机状态窗口", "Close local status window")),
+            None,
+        );
+    }
     fn new() -> Self {
         Self {
             body: null_mut(),
@@ -693,6 +711,7 @@ impl Owned {
                 SendMessageW(state.body, EM_SETLIMITTEXT, 256 * 1024, 0);
                 SendMessageW(state.body, WM_SETFONT, state.font as usize, 0);
                 SendMessageW(state.close, WM_SETFONT, state.font as usize, 0);
+                state.annotate_controls(self.hwnd);
                 state.layout(self.hwnd, pinned);
             }
             if visible {
@@ -822,6 +841,7 @@ impl StatusPopup {
                     wide(label("机控 · 本机状态", "Jiks · Status")).as_ptr(),
                 );
                 SetWindowTextW(state.close, wide(label("关闭", "Close")).as_ptr());
+                state.annotate_controls(window.hwnd);
                 ensure!(
                     SetWindowPos(
                         window.hwnd,
@@ -897,6 +917,7 @@ impl StatusPopup {
                     wide(label("机控 · 本机状态", "Jiks · Status")).as_ptr(),
                 );
                 SetWindowTextW(state.close, wide(label("关闭", "Close")).as_ptr());
+                state.annotate_controls(window.hwnd);
             }
             if reflow || dpi != 0 {
                 let mut rect: RECT = zeroed();
@@ -1239,6 +1260,7 @@ mod tests {
     }
     #[test]
     fn hidden_native_lifecycle_updates_same_hwnd_and_keeps_borrowed_state_until_destroyed() {
+        let _accessibility = a11y::UiThread::enter().unwrap();
         i18n::set_language("en");
         let mut owned = Owned::new();
         unsafe {
@@ -1298,5 +1320,91 @@ mod tests {
         drop(borrow);
         owned.close().unwrap();
         assert!(owned.hwnd.is_null());
+    }
+    #[test]
+    fn never_visible_status_uia_keeps_live_native_value_and_localizes_stable_semantics() {
+        let _language = i18n::TestLanguage::new("en");
+        let _accessibility = a11y::UiThread::enter().unwrap();
+        let mut owned = Owned::new();
+        unsafe {
+            owned
+                .create(
+                    null_mut(),
+                    96,
+                    true,
+                    Bounds {
+                        left: 0,
+                        top: 0,
+                        right: 480,
+                        bottom: 600,
+                    },
+                    false,
+                )
+                .unwrap();
+        }
+        let mut model = UiModel::default();
+        model.values.insert("power.mode".into(), json!(255));
+        model
+            .values
+            .insert("preset.active_name".into(), json!("synthetic preset one"));
+        let (body, close) = {
+            let mut state = owned.callback.state.borrow_mut();
+            unsafe {
+                state.update(&model, 1000).unwrap();
+            }
+            (state.body, state.close)
+        };
+        let first = a11y::read_for_test(&[owned.hwnd, body, close]).unwrap();
+        assert_eq!(first[0].id, "status-popup.root");
+        assert_eq!(first[1].id, "status-popup.body");
+        assert_eq!(first[1].name, "Local status details");
+        assert_eq!(
+            first[1].control_type,
+            windows::Win32::UI::Accessibility::UIA_DocumentControlTypeId.0
+        );
+        assert_eq!(first[1].read_only, Some(true));
+        assert!(
+            first[1]
+                .value
+                .as_ref()
+                .unwrap()
+                .contains("synthetic preset one")
+        );
+        assert_eq!(first[2].id, "status-popup.close");
+        assert_eq!(first[2].name, "Close local status window");
+        assert!(first[2].invoke);
+        assert_eq!(
+            first[2].control_type,
+            windows::Win32::UI::Accessibility::UIA_ButtonControlTypeId.0
+        );
+        assert_eq!(unsafe { IsWindowVisible(owned.hwnd) }, 0);
+        assert_eq!(unsafe { IsWindowVisible(body) }, 0);
+        assert_eq!(unsafe { IsWindowVisible(close) }, 0);
+        model
+            .values
+            .insert("preset.active_name".into(), json!("synthetic preset two"));
+        i18n::set_language("zh-Hans");
+        {
+            let mut state = owned.callback.state.borrow_mut();
+            unsafe {
+                state.update(&model, 1001).unwrap();
+            }
+            state.annotate_controls(owned.hwnd);
+        }
+        let second = a11y::read_for_test(&[body, close]).unwrap();
+        assert_eq!(second[0].id, first[1].id);
+        assert_eq!(second[0].name, "本机状态详情");
+        assert!(
+            second[0]
+                .value
+                .as_ref()
+                .unwrap()
+                .contains("synthetic preset two")
+        );
+        assert!(!second[0].name.contains("synthetic preset"));
+        assert_eq!(second[1].id, first[2].id);
+        assert_eq!(second[1].name, "关闭本机状态窗口");
+        assert_eq!(unsafe { IsWindowVisible(owned.hwnd) }, 0);
+        owned.close().unwrap();
     }
 }

@@ -16,6 +16,7 @@ mod forms;
 mod layout;
 #[path = "spectrum_editor.rs"]
 mod spectrum_editor;
+use super::a11y;
 use super::catalog::{AUTOMATION_ACTIONS, AUTOMATION_TRIGGERS, EditorKind};
 use super::native::*;
 use super::selectors::{self, FileFilter, PickerKind};
@@ -76,6 +77,144 @@ enum Mode {
     Automation,
     Macro,
     SensorSettings,
+}
+impl Mode {
+    fn accessibility_key(&self) -> String {
+        match self {
+            Self::Document(id) => format!("editor.document.{id}"),
+            Self::Form(id) => format!("editor.settings.{id}"),
+            Self::Layout(id) => format!("editor.layout.{id}"),
+            Self::Backup => "editor.backup".into(),
+            Self::Hotkeys => "editor.hotkeys".into(),
+            Self::Spectrum => "editor.spectrum".into(),
+            Self::Console => "editor.console".into(),
+            Self::Arguments => "editor.arguments".into(),
+            Self::FirstLanguage => "editor.language".into(),
+            Self::Preset => "editor.preset".into(),
+            Self::Automation => "editor.automation".into(),
+            Self::Macro => "editor.macro".into(),
+            Self::SensorSettings => "editor.sensors".into(),
+        }
+    }
+}
+/// Logical roles for the fixed native IDs. IDs dispatch existing commands;
+/// accessibility identity does not depend on localized captions or row order.
+fn control_role(id: u16) -> Option<(&'static str, &'static str)> {
+    Some(match id {
+        SAVE => ("save", "保存"),
+        CANCEL => ("cancel", "取消"),
+        EDITOR_TAB => ("category", "设置分类"),
+        ACTION_TYPE => ("action-type", "动作类型"),
+        TRIGGER_TYPE => ("trigger-type", "触发条件"),
+        STEP_LIST => ("steps", "动作列表"),
+        CONDITION_LIST => ("conditions", "条件列表"),
+        STEP_ADD => ("step-add", "添加动作"),
+        STEP_UPDATE => ("step-update", "更新所选"),
+        STEP_DELETE => ("step-delete", "删除"),
+        STEP_UP => ("step-up", "上移"),
+        STEP_DOWN => ("step-down", "下移"),
+        CONDITION_ADD => ("condition-save", "添加 / 更新条件"),
+        CONDITION_DELETE => ("condition-delete", "移除条件"),
+        EVENT_ADD => ("event-add", "添加事件"),
+        EVENT_UPDATE => ("event-update", "更新所选"),
+        EVENT_DELETE => ("event-delete", "删除"),
+        EVENT_UP => ("event-up", "上移"),
+        EVENT_DOWN => ("event-down", "下移"),
+        RECORD_START => ("record-start", "开始录制"),
+        RECORD_STOP => ("record-stop", "停止录制"),
+        EVENT_KIND => ("event-kind", "事件类型"),
+        EVENT_CLEAR => ("events-clear", "清空"),
+        SENSOR_DEFAULTS => ("sensor-display-defaults", "恢复默认显示设置"),
+        63 => ("output", "命令输出"),
+        64 => ("stop-waiting", "停止等待"),
+        70 => ("create-backup", "创建备份"),
+        71 => ("restore-backup", "还原备份…"),
+        80 => ("groups", "分组列表"),
+        81 => ("group-items", "项目列表"),
+        82 => ("group-add", "新建分组"),
+        83 => ("group-update", "更新分组"),
+        84 => ("group-delete", "删除分组"),
+        85 => ("group-up", "上移"),
+        86 => ("group-down", "下移"),
+        87 => ("item-add", "添加"),
+        88 => ("item-delete", "移除"),
+        89 => ("item-up", "上移"),
+        90 => ("item-down", "下移"),
+        91 => ("groups-defaults", "恢复原版分组"),
+        93 => ("item-visibility", "显示/隐藏"),
+        100 => ("discovered-keys", "已发现按键"),
+        101 => ("key-load", "载入此按键"),
+        102 => ("single-press-actions", "单击操作"),
+        103 => ("double-press-actions", "双击操作"),
+        104 => ("single-add", "添加"),
+        105 => ("single-delete", "移除"),
+        106 => ("single-up", "上移"),
+        107 => ("single-down", "下移"),
+        110 => ("key-discovery-start", "发现按键"),
+        111 => ("key-discovery-stop", "停止发现"),
+        114 => ("double-add", "添加"),
+        115 => ("double-delete", "移除"),
+        116 => ("double-up", "上移"),
+        117 => ("double-down", "下移"),
+        119 => ("key-cleanup-retry", "重试清理"),
+        120 => ("effects", "灯效列表"),
+        121 => ("effect-add", "添加灯效"),
+        122 => ("effect-update", "更新所选"),
+        123 => ("effect-delete", "删除"),
+        124 => ("effect-up", "上移"),
+        125 => ("effect-down", "下移"),
+        126 => ("effects-clear", "清空"),
+        127 => ("effects-refresh", "重新读取"),
+        128 => ("effects-reset", "恢复此预设…"),
+        130 => ("colors", "颜色列表 · #RRGGBB"),
+        131 => ("color-add", "添加颜色"),
+        132 => ("color-delete", "删除颜色"),
+        133 => ("color-up", "上移"),
+        134 => ("color-down", "下移"),
+        135 => ("effects-import", "导入到草稿"),
+        136 => ("effects-export", "导出灯效"),
+        142 => ("zones-select-all", "全选分区"),
+        143 => ("zones-clear", "清除选择"),
+        144 => ("notification-type", "通知类型"),
+        145 => ("notification-reset", "重置此类型"),
+        146 => ("restore-file", "选择还原文件…"),
+        147 => ("export-file", "选择导出文件…"),
+        148 => ("arguments-reload", "重新读取"),
+        149 => ("action-search", "搜索动作目录"),
+        150 => ("action-palette", "动作目录"),
+        151 => ("action-bulk-add", "批量添加所选模板"),
+        900 => ("document", "高级配置"),
+        _ => return None,
+    })
+}
+#[cfg(test)]
+mod accessibility_contract_tests {
+    use super::*;
+    #[test]
+    fn fixed_editor_controls_have_distinct_semantic_roles_in_both_languages() {
+        let mut roles = std::collections::BTreeSet::new();
+        for id in 0..=900 {
+            if let Some((role, name)) = control_role(id) {
+                assert!(roles.insert(role), "duplicate editor control role: {role}");
+                assert!(!name.is_empty());
+            }
+        }
+        assert!(roles.len() >= 70);
+        for mode in [
+            Mode::SensorSettings,
+            Mode::Preset,
+            Mode::Macro,
+            Mode::Automation,
+            Mode::Form("osd".into()),
+            Mode::Layout("dashboard".into()),
+        ] {
+            let chinese = a11y::key(&mode.accessibility_key(), "field", "thermal.enabled");
+            super::super::i18n::set_language("en");
+            let english = a11y::key(&mode.accessibility_key(), "field", "thermal.enabled");
+            assert_eq!(english, chinese);
+            super::super::i18n::set_language("zh-Hans");
+        }
+    }
 }
 #[derive(Clone)]
 enum Kind {
@@ -312,6 +451,7 @@ pub(super) fn document(parent: HWND, bridge: UiBridge, id: String) -> Result<()>
 }
 
 fn open(parent: HWND, bridge: UiBridge, mode: Mode, data: Value) -> Result<()> {
+    let _accessibility = a11y::UiThread::enter()?;
     unsafe {
         let class = wide("Jiks.Native.Editor");
         let brush = CreateSolidBrush(paper());
@@ -470,6 +610,8 @@ fn open(parent: HWND, bridge: UiBridge, mode: Mode, data: Value) -> Result<()> {
             drop(Box::from_raw(raw));
             bail!("无法打开编辑窗口：{}", GetLastError());
         }
+        let accessibility_key = (*raw).borrow().mode.accessibility_key();
+        a11y::annotate(hwnd, &accessibility_key, None, None);
         EnableWindow(parent, 0);
         ShowWindow(hwnd, SW_SHOWNORMAL);
         SetForegroundWindow(hwnd);
@@ -1134,6 +1276,19 @@ impl Editor {
                 rect,
                 clip_height: if class == "COMBOBOX" { 30 } else { rect[3] },
             });
+            if let Some((role, name)) = control_role(id) {
+                let name = if id == STEP_LIST && matches!(self.mode, Mode::Macro) {
+                    "事件列表"
+                } else {
+                    name
+                };
+                a11y::annotate(
+                    hwnd,
+                    &a11y::key(&self.mode.accessibility_key(), "control", role),
+                    (class != "BUTTON").then(|| tr_static(name)),
+                    None,
+                );
+            }
             hwnd
         }
     }
@@ -1206,6 +1361,14 @@ impl Editor {
             if !capability.is_empty() {
                 EnableWindow(h, live_snapshot(&self.bridge).can(capability) as i32);
                 self.body_buttons.push((h, capability.into()));
+                a11y::annotate(
+                    h,
+                    &a11y::key(&self.mode.accessibility_key(), "command", capability),
+                    None,
+                    (!live_snapshot(&self.bridge).can(capability))
+                        .then(|| live_snapshot(&self.bridge).unavailable_reason(capability))
+                        .as_deref(),
+                );
             }
             h
         }
@@ -1213,7 +1376,13 @@ impl Editor {
     unsafe fn input(&mut self, key: &str, label: &str, kind: Kind, y: i32, width: i32) -> HWND {
         unsafe {
             let editor_x = if width < 650 { 205 } else { 240 };
-            self.label(label, y + 3, editor_x - 40, 34, false);
+            let label_hwnd = self.label(label, y + 3, editor_x - 40, 34, false);
+            a11y::annotate(
+                label_hwnd,
+                &a11y::key(&self.mode.accessibility_key(), "label", key),
+                None,
+                None,
+            );
             let id = 1000 + self.edits.len() as u16;
             let value = self.value(key);
             let picker = if matches!(&kind, Kind::Text | Kind::Lines) {
@@ -1314,6 +1483,12 @@ impl Editor {
                     h
                 }
             };
+            a11y::annotate(
+                h,
+                &a11y::key(&self.mode.accessibility_key(), "field", key),
+                Some(&tr(label)),
+                None,
+            );
             if let Some(picker) = picker {
                 let browse_id = 5000 + self.picker_buttons.len() as u16;
                 let button = self.place(
@@ -1327,6 +1502,12 @@ impl Editor {
                 EnableWindow(
                     button,
                     (!self.modal_active && self.pending.is_none()) as i32,
+                );
+                a11y::annotate(
+                    button,
+                    &a11y::key(&self.mode.accessibility_key(), "browse", key),
+                    Some(&format!("{} · {}", tr(label), tr_static("选择…"))),
+                    None,
                 );
                 self.picker_buttons.insert(
                     browse_id,
@@ -1523,6 +1704,12 @@ impl Editor {
                 ],
                 self.font,
             );
+            a11y::annotate(
+                self.status,
+                &a11y::key(&self.mode.accessibility_key(), "text", "status"),
+                None,
+                None,
+            );
             self.save = create(
                 self.hwnd,
                 "BUTTON",
@@ -1537,6 +1724,12 @@ impl Editor {
                 ],
                 self.font,
             );
+            a11y::annotate(
+                self.save,
+                &a11y::key(&self.mode.accessibility_key(), "action", "save"),
+                None,
+                None,
+            );
             self.cancel = create(
                 self.hwnd,
                 "BUTTON",
@@ -1550,6 +1743,12 @@ impl Editor {
                     self.s(32),
                 ],
                 self.font,
+            );
+            a11y::annotate(
+                self.cancel,
+                &a11y::key(&self.mode.accessibility_key(), "action", "cancel"),
+                None,
+                None,
             );
             if matches!(self.mode, Mode::FirstLanguage) {
                 text(self.save, tr_static("应用"));
@@ -2545,6 +2744,12 @@ impl Editor {
                             [editor_x, y, 100, 30],
                             self.font,
                         );
+                        a11y::annotate(
+                            edit,
+                            &a11y::key(&self.mode.accessibility_key(), "field", key),
+                            Some(&label),
+                            None,
+                        );
                         self.edits.push(Edit {
                             key: (*key).into(),
                             hwnd: edit,
@@ -2563,6 +2768,12 @@ impl Editor {
                                     [editor_x + 116, y, (width - editor_x - 136).max(120), 30]
                                 },
                                 self.font,
+                            );
+                            a11y::annotate(
+                                slider,
+                                &a11y::key(&self.mode.accessibility_key(), "range", key),
+                                Some(&label),
+                                None,
                             );
                             SendMessageW(slider, TBM_SETRANGEMIN, 0, range.minimum as isize);
                             SendMessageW(slider, TBM_SETRANGEMAX, 1, range.maximum as isize);

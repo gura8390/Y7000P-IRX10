@@ -41,6 +41,7 @@ mod package_host;
 mod policy_host;
 mod preferences_host;
 mod script_host;
+mod sensor_schedule;
 mod spectrum_files;
 mod startup_host;
 mod ui_effects;
@@ -172,30 +173,6 @@ impl Engine {
             self.value("macro.prepare_remaining_seconds", json!(0));
             self.finish(preparing.id, false, message);
         }
-    }
-    fn display_interval_ms(&self) -> Result<u64> {
-        let document = if self
-            .repository
-            .document("application")?
-            .root()
-            .get_ci("UseNewSensorDashboard")
-            .and_then(JsonNode::as_bool)
-            == Some(true)
-        {
-            "sensor_dashboard"
-        } else {
-            "dashboard"
-        };
-        Ok((self
-            .repository
-            .document(document)?
-            .root()
-            .get_ci("SensorsRefreshIntervalSeconds")
-            .and_then(JsonNode::as_f64)
-            .filter(|value| value.is_finite())
-            .unwrap_or(1.)
-            .clamp(0.1, 60.)
-            * 1000.) as u64)
     }
     fn with_fps<T>(
         &mut self,
@@ -1277,6 +1254,7 @@ impl Engine {
         let now = monotonic_ms();
         let app =
             ApplicationThermalSettings::from_document(self.repository.document("application")?)?;
+        let sensor_interval = self.sensor_demand()?.interval_ms;
         let gpu_visible = {
             let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             state.values.get("ui.main_visible").and_then(Value::as_bool) == Some(true)
@@ -1320,7 +1298,7 @@ impl Engine {
                 }
             }
         }
-        if (!app.hardware_sensors_enabled || self.read_only || !self.sensor_consumers())
+        if (!app.hardware_sensors_enabled || self.read_only || sensor_interval.is_none())
             && self.gpu_sampling_requested
         {
             self.gpu_sampling_requested = false;
@@ -1339,13 +1317,19 @@ impl Engine {
             }
             self.enqueue_read("temperature".into(), A::ReadCpuTemperature, false);
         }
-        if app.hardware_sensors_enabled
-            && !self.read_only
-            && self.sensor_consumers()
-            && now >= self.next_metrics
+        if let Some(interval) = sensor_interval
+            .filter(|_| app.hardware_sensors_enabled && !self.read_only)
         {
+            // A newly visible/faster consumer cannot inherit a previous slow
+            // dashboard deadline. Keep an already earlier deadline unchanged.
+            self.next_metrics = self.next_metrics.min(now.saturating_add(interval));
+            self.next_presentation = self.next_presentation.min(now.saturating_add(interval));
+        }
+        if let Some(interval) = sensor_interval.filter(|_| {
+            app.hardware_sensors_enabled && !self.read_only && now >= self.next_metrics
+        }) {
             self.gpu_sampling_requested = true;
-            self.next_metrics = now.saturating_add(self.display_interval_ms()?);
+            self.next_metrics = now.saturating_add(interval);
             if !self.read_queue.iter().any(|v| v.0 == "telemetry") {
                 self.enqueue_read("telemetry".into(), A::ReadTelemetry, false);
             }
@@ -2183,6 +2167,67 @@ impl Engine {
         state.revision += 1;
         Ok(true)
     }
+    fn wait_duration(&self, now: u64) -> Result<Duration> {
+        Ok(if self.pending.is_some()
+            || self.maintenance.is_some()
+            || self.reader_close.is_some()
+            || self.shutdown.is_some()
+            || self.automation.is_busy()
+            || self.packages.is_busy()
+            || self.script.is_busy()
+            || self.integration.is_busy()
+            || self.aux.polling()
+            || self.fps.is_busy() && !self.fps.is_active()
+            || self.ui_effects.is_busy()
+            || self.spectrum_file.is_some()
+            || self.startup_job.is_some()
+            || self.reading.is_some()
+            || self.player.is_active()
+            || self.recorder.is_active()
+            || self.record_preparation.is_some()
+        {
+            Duration::from_millis(25)
+        } else if !self.read_queue.is_empty() {
+            Duration::ZERO
+        } else if self.automation.is_source_active()
+            || self.integration.is_active()
+            || self.keys.is_active()
+            || self.fps.is_active()
+        {
+            Duration::from_millis(50)
+        } else {
+            let app = ApplicationThermalSettings::from_document(
+                self.repository.document("application")?,
+            )?;
+            let mut next = None;
+            if self.controller.is_some() || self.shadow.is_some() {
+                next = Some(self.next_temperature.min(self.next_control));
+            }
+            if app.hardware_sensors_enabled && !self.read_only && self.sensor_consumers()? {
+                next = Some(next.map_or(self.next_metrics, |n: u64| n.min(self.next_metrics)));
+            }
+            let gpu_visible = {
+                let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                state.values.get("ui.main_visible").and_then(Value::as_bool) == Some(true)
+                    && state.values.get("ui.page").and_then(Value::as_str) == Some("dashboard")
+            };
+            if self.gpu_process_monitoring && !self.read_only && gpu_visible {
+                next = Some(next.map_or(self.next_gpu_metadata, |n: u64| {
+                    n.min(self.next_gpu_metadata)
+                }));
+            }
+            let wait = next.map(|deadline| {
+                Duration::from_millis(deadline.saturating_sub(now).clamp(1, 250))
+            })
+            .unwrap_or(Duration::from_secs(30));
+            self.aux.next_deadline().map_or(wait, |deadline| {
+                // Preserve the existing fast-source caps, but an otherwise idle
+                // 2s battery metadata consumer needs neither a 30s stall nor a
+                // permanent 25/250ms polling loop just because its port is alive.
+                wait.min(Duration::from_millis(deadline.saturating_sub(now).max(1)))
+            })
+        })
+    }
     pub(crate) fn run(&mut self) -> Result<()> {
         loop {
             if let Err(error) = self.poll_write() {
@@ -2236,60 +2281,7 @@ impl Engine {
             if let Err(error) = self.periodic() {
                 self.contain_fault(0, error);
             }
-            let wait = if self.pending.is_some()
-                || self.maintenance.is_some()
-                || self.reader_close.is_some()
-                || self.shutdown.is_some()
-                || self.automation.is_busy()
-                || self.packages.is_busy()
-                || self.script.is_busy()
-                || self.integration.is_busy()
-                || self.aux.polling()
-                || self.fps.is_busy() && !self.fps.is_active()
-                || self.ui_effects.is_busy()
-                || self.spectrum_file.is_some()
-                || self.startup_job.is_some()
-                || self.reading.is_some()
-                || self.player.is_active()
-                || self.recorder.is_active()
-                || self.record_preparation.is_some()
-            {
-                Duration::from_millis(25)
-            } else if !self.read_queue.is_empty() {
-                Duration::ZERO
-            } else if self.automation.is_source_active()
-                || self.integration.is_active()
-                || self.keys.is_active()
-                || self.fps.is_active()
-            {
-                Duration::from_millis(50)
-            } else {
-                let app = ApplicationThermalSettings::from_document(
-                    self.repository.document("application")?,
-                )?;
-                let now = monotonic_ms();
-                let mut next = None;
-                if self.controller.is_some() || self.shadow.is_some() {
-                    next = Some(self.next_temperature.min(self.next_control));
-                }
-                if app.hardware_sensors_enabled && !self.read_only && self.sensor_consumers() {
-                    next = Some(next.map_or(self.next_metrics, |n: u64| n.min(self.next_metrics)));
-                }
-                let gpu_visible = {
-                    let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-                    state.values.get("ui.main_visible").and_then(Value::as_bool) == Some(true)
-                        && state.values.get("ui.page").and_then(Value::as_str) == Some("dashboard")
-                };
-                if self.gpu_process_monitoring && !self.read_only && gpu_visible {
-                    next = Some(next.map_or(self.next_gpu_metadata, |n: u64| {
-                        n.min(self.next_gpu_metadata)
-                    }));
-                }
-                next.map(|deadline| {
-                    Duration::from_millis(deadline.saturating_sub(now).clamp(1, 250))
-                })
-                .unwrap_or(Duration::from_secs(30))
-            };
+            let wait = self.wait_duration(monotonic_ms())?;
             match self.receiver.recv_timeout(wait) {
                 Ok(command) => {
                     let id = command.request_id();

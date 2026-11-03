@@ -54,6 +54,12 @@ impl AuxHost {
             || !self.queue.is_empty()
             || self.stopping && !self.cleanup_failed
     }
+    pub(super) fn next_deadline(&self) -> Option<u64> {
+        // A retained, idle port is not pending work. Wake at its actual slow
+        // sample deadline, and never turn a latched cleanup failure into a retry.
+        (self.wanted && !self.stopping && !self.cleanup_failed && !self.polling())
+            .then_some(self.next_sample)
+    }
     pub(super) fn cancel(&mut self) {
         self.stopping = true;
     }
@@ -111,27 +117,9 @@ impl AuxHost {
         let enabled =
             ApplicationThermalSettings::from_document(engine.repository.document("application")?)?
                 .hardware_sensors_enabled;
-        let (status_visible, full_view) = {
-            let state = engine.state.lock().unwrap_or_else(|p| p.into_inner());
-            (
-                state
-                    .values
-                    .get("ui.status_visible")
-                    .and_then(Value::as_bool)
-                    == Some(true),
-                state.values.get("ui.main_visible").and_then(Value::as_bool) == Some(true)
-                    && state
-                        .values
-                        .get("ui.page")
-                        .and_then(Value::as_str)
-                        .is_some_and(|page| matches!(page, "dashboard" | "battery"))
-                    || state
-                        .values
-                        .get("osd.actual_visible")
-                        .and_then(Value::as_bool)
-                        == Some(true),
-            )
-        };
+        let demand = engine.sensor_demand()?;
+        let status_visible = demand.status_visible;
+        let full_view = demand.full_view;
         let thermal_desired = !engine.read_only && enabled && (full_view || status_visible)
             || !engine.read_only && engine.hwinfo_consumer();
         let full_sensors = !engine.read_only && (enabled && full_view || engine.hwinfo_consumer());
@@ -429,28 +417,7 @@ impl Engine {
             Err(payload) => std::panic::resume_unwind(payload),
         }
     }
-    pub(super) fn sensor_consumers(&self) -> bool {
-        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        let visible = state.values.get("ui.main_visible").and_then(Value::as_bool) == Some(true)
-            && state
-                .values
-                .get("ui.page")
-                .and_then(Value::as_str)
-                .is_some_and(|page| matches!(page, "dashboard" | "battery"));
-        let osd = state
-            .values
-            .get("osd.actual_visible")
-            .and_then(Value::as_bool)
-            == Some(true);
-        let hwinfo = self.hwinfo_consumer();
-        let status = state
-            .values
-            .get("ui.status_visible")
-            .and_then(Value::as_bool)
-            == Some(true);
-        visible || osd || hwinfo || status
-    }
-    fn hwinfo_consumer(&self) -> bool {
+    pub(super) fn hwinfo_consumer(&self) -> bool {
         self.repository
             .document("integrations")
             .ok()
@@ -519,7 +486,7 @@ mod tests {
         let mut fixture = super::super::lifecycle_tests::Fixture::new();
         fixture.engine.read_only = true;
         fixture.engine.value("ui.status_visible", json!(true));
-        assert!(fixture.engine.sensor_consumers());
+        assert!(fixture.engine.sensor_consumers().unwrap());
         let (mut host, answers, calls, _) = fake();
         let history = Arc::new(Mutex::new(Some(Ok(json!({"since_utc":null})))));
         answers
@@ -532,6 +499,106 @@ mod tests {
         assert_eq!(host.reading.as_ref().unwrap().key, "battery");
         assert_eq!(calls.load(Ordering::Relaxed), 2);
         assert!(host.queue.is_empty());
+    }
+    #[test]
+    fn idle_status_battery_refresh_wakes_at_its_own_two_second_deadline() {
+        let mut fixture = super::super::lifecycle_tests::Fixture::new();
+        fixture.engine.read_only = true;
+        fixture.engine.repository.save("application", SettingsDocument::parse(
+            r#"{"EnableHardwareSensors":false}"#).unwrap()).unwrap();
+        fixture.engine.value("ui.status_visible", json!(true));
+        let (mut host, answers, calls, created) = fake();
+        answers.lock().unwrap().extend([
+            Arc::new(Mutex::new(Some(Ok(json!({"since_utc": null}))))),
+            Arc::new(Mutex::new(Some(Ok(json!({"batteries": []}))))),
+        ]);
+        host.poll(&mut fixture.engine).unwrap();
+        assert_eq!(host.reading.as_ref().unwrap().key, "battery.history");
+        host.poll(&mut fixture.engine).unwrap();
+        assert_eq!(host.reading.as_ref().unwrap().key, "battery");
+        host.poll(&mut fixture.engine).unwrap();
+        assert!(host.wanted && host.is_busy() && !host.polling());
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(created.load(Ordering::Relaxed), 1);
+        assert!(fixture.log.lock().unwrap().is_empty());
+
+        let now = monotonic_ms();
+        host.next_sample = now.saturating_add(2000);
+        fixture.engine.aux = host;
+        fixture.engine.next_temperature = now.saturating_add(123);
+        let temperature_deadline = fixture.engine.next_temperature;
+        assert_eq!(
+            fixture.engine.wait_duration(now).unwrap(),
+            Duration::from_secs(2)
+        );
+        assert_eq!(fixture.engine.next_temperature, temperature_deadline);
+        assert!(fixture.engine.last_temperature.is_none());
+        // The same permission-off status demand exists in normal production,
+        // not only in the application's explicit read-only diagnostic mode.
+        fixture.engine.read_only = false;
+        assert_eq!(
+            fixture.engine.wait_duration(now).unwrap(),
+            Duration::from_secs(2)
+        );
+        assert_eq!(fixture.engine.next_temperature, temperature_deadline);
+        assert!(fixture.log.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn idle_aux_deadline_is_due_bounded_and_preserves_earlier_metric_work() {
+        let mut fixture = super::super::lifecycle_tests::Fixture::new();
+        let now = monotonic_ms();
+        let mut host = AuxHost::default();
+        host.wanted = true;
+        host.next_sample = now.saturating_add(2000);
+        fixture.engine.aux = host;
+        fixture.engine.read_only = true;
+        assert_eq!(fixture.engine.wait_duration(now).unwrap(), Duration::from_secs(2));
+        assert_eq!(fixture.engine.wait_duration(now + 1999).unwrap(), Duration::from_millis(1));
+        assert_eq!(fixture.engine.wait_duration(now + 2000).unwrap(), Duration::from_millis(1));
+        assert_eq!(fixture.engine.wait_duration(now + 3000).unwrap(), Duration::from_millis(1));
+
+        fixture.engine.read_only = false;
+        fixture.engine.value("ui.status_visible", json!(true));
+        fixture.engine.repository.save("application", SettingsDocument::parse(
+            r#"{"EnableHardwareSensors":true}"#).unwrap()).unwrap();
+        fixture.engine.next_metrics = now + 50;
+        assert_eq!(fixture.engine.wait_duration(now).unwrap(), Duration::from_millis(50));
+        fixture.engine.next_metrics = now + 500;
+        assert_eq!(fixture.engine.wait_duration(now).unwrap(), Duration::from_millis(250));
+        assert!(fixture.log.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn actual_pending_aux_read_retains_the_completion_poll_without_idle_busy_spin() {
+        let mut fixture = super::super::lifecycle_tests::Fixture::new();
+        let (mut host, answers, calls, _) = fake();
+        answers.lock().unwrap().push_back(Arc::new(Mutex::new(None)));
+        host.battery_information(&mut fixture.engine, 42).unwrap();
+        host.poll(&mut fixture.engine).unwrap();
+        assert!(host.polling());
+        assert_eq!(host.next_deadline(), None);
+        fixture.engine.aux = host;
+        assert_eq!(fixture.engine.wait_duration(monotonic_ms()).unwrap(), Duration::from_millis(25));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn failed_aux_cleanup_has_no_automatic_timer_or_retry_and_idle_demand_off_sleeps() {
+        let mut fixture = super::super::lifecycle_tests::Fixture::new();
+        fixture.engine.read_only = true;
+        assert_eq!(fixture.engine.wait_duration(monotonic_ms()).unwrap(), Duration::from_secs(30));
+        fixture.engine.value("ui.status_visible", json!(true));
+        let (mut host, _, calls, created) = fake();
+        host.port = Some((host.factory)(fixture.engine.repository.root().join("fake-unused.json")).unwrap());
+        host.wanted = true;
+        host.stopping = true;
+        host.cleanup_failed = true;
+        host.next_sample = 0;
+        host.poll(&mut fixture.engine).unwrap();
+        assert!(host.is_busy() && !host.polling());
+        assert_eq!(host.next_deadline(), None);
+        fixture.engine.aux = host;
+        assert_eq!(fixture.engine.wait_duration(monotonic_ms()).unwrap(), Duration::from_secs(30));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(created.load(Ordering::Relaxed), 1);
     }
     #[test]
     fn readonly_idle_and_enabled_without_consumers_create_no_aux_worker() {
@@ -557,6 +624,21 @@ mod tests {
         for _ in 0..4 {
             host.poll(&mut fixture.engine).unwrap();
         }
+        assert_eq!(created.load(Ordering::Relaxed), 0);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+    #[test]
+    fn dashboard_with_hidden_sensors_does_not_start_slow_auxiliary_sources() {
+        let mut fixture = super::super::lifecycle_tests::Fixture::new();
+        fixture.engine.repository.save("application", SettingsDocument::parse(
+            r#"{"EnableHardwareSensors":true}"#).unwrap()).unwrap();
+        fixture.engine.repository.save("dashboard", SettingsDocument::parse(
+            r#"{"ShowSensors":false}"#).unwrap()).unwrap();
+        fixture.engine.value("ui.main_visible", json!(true));
+        fixture.engine.value("ui.page", json!("dashboard"));
+        let (mut host, _, calls, created) = fake();
+        host.poll(&mut fixture.engine).unwrap();
+        assert!(!host.wanted && !host.is_busy());
         assert_eq!(created.load(Ordering::Relaxed), 0);
         assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
