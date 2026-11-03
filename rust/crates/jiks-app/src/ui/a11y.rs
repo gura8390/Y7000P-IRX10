@@ -384,10 +384,15 @@ pub(super) fn read_for_test(handles: &[HWND]) -> Result<Vec<Probe>> {
         core::Interface,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
-    let handles: Vec<usize> = handles.iter().map(|handle| *handle as usize).collect();
+    let handles: Vec<(usize, Option<String>)> = handles
+        .iter()
+        .map(|handle| (*handle as usize, identity(*handle)))
+        .collect();
     let reader = std::thread::spawn(move || -> Result<Vec<Probe>> {
         unsafe {
-            CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
+            CoInitializeEx(None, COINIT_MULTITHREADED)
+                .ok()
+                .context("UIA test reader: initialize independent MTA")?;
         }
         struct Mta;
         impl Drop for Mta {
@@ -397,46 +402,84 @@ pub(super) fn read_for_test(handles: &[HWND]) -> Result<Vec<Probe>> {
         }
         let _apartment = Mta;
         let automation: IUIAutomation2 =
-            unsafe { CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)? };
+            unsafe { CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER) }
+                .context("UIA test reader: create native CUIAutomation8 client")?;
         unsafe {
-            automation.SetConnectionTimeout(2000)?;
-            automation.SetTransactionTimeout(2000)?;
+            automation
+                .SetConnectionTimeout(2000)
+                .context("UIA test reader: SetConnectionTimeout")?;
+            automation
+                .SetTransactionTimeout(2000)
+                .context("UIA test reader: SetTransactionTimeout")?;
         }
-        let client: IUIAutomation = automation.cast()?;
+        let client: IUIAutomation = automation
+            .cast()
+            .context("UIA test reader: query IUIAutomation interface")?;
         handles
             .into_iter()
-            .map(|handle| -> Result<Probe> {
-                unsafe {
-                    let element = client.ElementFromHandle(ComHwnd(handle as HWND))?;
-                    let value = element
-                        .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
-                        .ok();
-                    let toggle = element
-                        .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
-                        .ok();
-                    Ok(Probe {
-                        name: element.CurrentName()?.to_string(),
-                        id: element.CurrentAutomationId()?.to_string(),
-                        help: element.CurrentHelpText()?.to_string(),
-                        control_type: element.CurrentControlType()?.0,
-                        enabled: element.CurrentIsEnabled()?.as_bool(),
-                        offscreen: element.CurrentIsOffscreen()?.as_bool(),
-                        value: value
-                            .as_ref()
-                            .map(|pattern| pattern.CurrentValue().map(|value| value.to_string()))
-                            .transpose()?,
-                        read_only: value
-                            .as_ref()
-                            .map(|pattern| pattern.CurrentIsReadOnly().map(|value| value.as_bool()))
-                            .transpose()?,
-                        toggle: toggle
-                            .map(|pattern| pattern.CurrentToggleState().map(|value| value.0))
-                            .transpose()?,
-                        invoke: element
-                            .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
-                            .is_ok(),
-                    })
-                }
+            .map(|(handle, semantic_id)| -> Result<Probe> {
+                let read = || -> Result<Probe> {
+                    unsafe {
+                        let element = client
+                            .ElementFromHandle(ComHwnd(handle as HWND))
+                            .context("ElementFromHandle")?;
+                        let value = element
+                            .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                            .ok();
+                        let toggle = element
+                            .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+                            .ok();
+                        Ok(Probe {
+                            name: element.CurrentName().context("CurrentName")?.to_string(),
+                            id: element
+                                .CurrentAutomationId()
+                                .context("CurrentAutomationId")?
+                                .to_string(),
+                            help: element
+                                .CurrentHelpText()
+                                .context("CurrentHelpText")?
+                                .to_string(),
+                            control_type: element
+                                .CurrentControlType()
+                                .context("CurrentControlType")?
+                                .0,
+                            enabled: element
+                                .CurrentIsEnabled()
+                                .context("CurrentIsEnabled")?
+                                .as_bool(),
+                            offscreen: element
+                                .CurrentIsOffscreen()
+                                .context("CurrentIsOffscreen")?
+                                .as_bool(),
+                            value: value
+                                .as_ref()
+                                .map(|pattern| {
+                                    pattern.CurrentValue().map(|value| value.to_string())
+                                })
+                                .transpose()
+                                .context("ValuePattern.CurrentValue")?,
+                            read_only: value
+                                .as_ref()
+                                .map(|pattern| {
+                                    pattern.CurrentIsReadOnly().map(|value| value.as_bool())
+                                })
+                                .transpose()
+                                .context("ValuePattern.CurrentIsReadOnly")?,
+                            toggle: toggle
+                                .map(|pattern| pattern.CurrentToggleState().map(|value| value.0))
+                                .transpose()
+                                .context("TogglePattern.CurrentToggleState")?,
+                            invoke: element
+                                .GetCurrentPatternAs::<IUIAutomationInvokePattern>(
+                                    UIA_InvokePatternId,
+                                )
+                                .is_ok(),
+                        })
+                    }
+                };
+                read().with_context(|| {
+                    format!("UIA test reader: exact HWND {handle:#x}, annotation {semantic_id:?}")
+                })
             })
             .collect()
     });
