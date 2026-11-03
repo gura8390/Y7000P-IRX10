@@ -57,15 +57,15 @@ Descriptors do not prove a Spectrum handshake or successful profile writes.
 
 The current local source candidate freezes 162 Rust/Cargo/embedded inputs with
 aggregate SHA-256
-`1d333de4964e89991ae6139a852cea1cae9d1e69b2a8256cf209f32076adb217`.
-One complete workspace invocation passed **609 tests**, with no warnings,
-failures, ignored or filtered tests: app 93, core 47, platform 187, runtime 275
+`670e571f456d44a59e856fb476093b800e2a158937dba177fec8b29a5e6b8089`.
+One complete workspace invocation passed **619 tests**, with no warnings,
+failures, ignored or filtered tests: app 93, core 47, platform 193, runtime 279
 and store 7. The count includes the subsets described below; they are not added
 again. All frozen compilation-input bytes remained unchanged across this
 invocation and the subsequent Debug build.
 
 The matching GNU Debug executable is an `asInvoker` console build with SHA-256
-`8d8ed2d661bf6d54b6f83b5692e2225067a7ffd968457a0f34d7dd3ac9c0ffda`.
+`a629b3e586c82de19e92043a9fc9a10962a930107d7c49fcb95bf6b6ac192d78`.
 Static PE inspection verified AMD64, its console subsystem and `asInvoker`
 resource, with no unresolved static imports. A static import audit does not
 exercise optional runtime vendor libraries.
@@ -123,7 +123,7 @@ read-only `ui-layout` fake-backend contract through the native client: 26 stages
 call returned. All nine pages and eight categories were visited; sensor settings
 opened and cancelled, device information opened and closed, and `main.exit`
 completed actual fake shutdown with the root HWND gone. Fixture and helper both
-exited zero with empty stderr and unchanged binary hashes in about 61 seconds.
+exited zero with empty stderr and unchanged binary hashes.
 No mouse, keyboard, foreground forcing or process termination was used. This
 proves the tested Chinese fake-UI contract, not English end-to-end coverage,
 production device commands, temperature behavior or performance superiority.
@@ -137,7 +137,7 @@ ignored test, changed production style or synthetic successful observation was
 introduced. A diagnostic MSVC snapshot passed this bounded read contract; this
 does not identify the original mechanism as an initialization race or establish
 a production OSD fix. The complete test command uses standard `--show-output`
-so successful-test lookup counts are retained. The local 609-test run observed
+so successful-test lookup counts are retained. The local 619-test run observed
 one OSD lookup and no first error.
 
 ### Window-size compatibility
@@ -157,7 +157,32 @@ fixture, minimized and maximized save guards remain in place. Size-only saves
 clear the saved position; full coordinate pairs preserve both. Half coordinate
 pairs and invalid numeric values are rejected before any pending edit. Unknown
 nested size/position fields survive supported merges. Five native layout tests
-and four runtime persistence tests cover these corrections within the 609 total.
+and four runtime persistence tests cover these corrections within the 619 total.
+
+### Native CPU clock compatibility
+
+The current change restores live core-frequency reporting on this machine when
+CPUID.16H frequency information is absent. A read-only diagnosis established
+that valid native performance ratios were being discarded for lack of the
+reference bus. The corrected path uses complete invariant-TSC CPUID.15H
+enumeration and the read-only platform ratio through the existing signed module.
+Floating-point precision is retained through the ratio calculation. The
+per-sample reference identifies the actual source; an explicit OS-report
+fallback remains distinguishable from a native ratio clock.
+
+The hybrid dashboard/status frequency now follows the original P-core maximum
+or mean preference. Missing P-core readings are not replaced with E-core or OS
+values. Full-core, P-core and E-core metrics remain separate. Physical-core
+means exclude missing values without weighting SMT threads. The temperature
+supervisor still uses the conservative package/all-core hotspot independently
+of this display preference. GPU-only power reads do not acquire the new CPU
+platform register, and no service, permission or hardware-write path was added.
+
+Ten new regressions within the 619 total cover source calculation and validation,
+missing-source fallback/recovery, successful platform-ratio caching, fractional
+reference precision, old sample serialization and P-core display/projection
+semantics. These checks do not turn the ratio clock into effective-clock
+telemetry or compare CPU performance across different sampling instants.
 
 ### OSD and consumer scheduling corrections
 
@@ -188,7 +213,7 @@ thermal supervisor or changing hardware permissions:
   reproduced the old 30s wait versus the expected 2s through actual Fake ticket
   completions, then passed after correction.
 
-The 609-test invocation contains the consumer/deadline regressions. They do not
+The 619-test invocation contains the consumer/deadline regressions. They do not
 prove actual 100ms hardware cadence, temperature control or resource superiority.
 
 ### Historical evidence, not the current candidate
@@ -196,10 +221,21 @@ prove actual 100ms hardware cadence, temperature control or resource superiority
 The directory-identity and self-import corrections at source commit
 `27d1f7b19959fcc529a75404871060f49b29abce` passed 574 workspace tests locally and
 in MSVC CI. Their 160-input aggregate and executable hashes belong to RC.1, not
-to the 162-input, 609-test candidate above. Earlier failed MSVC jobs exposed the
+to the 162-input, 619-test candidate above. Earlier failed MSVC jobs exposed the
 8.3/long-path identity defects and remain part of the history. The intermediate
 573-test run and earlier 566/74/70-test stages are separate snapshots, not
 additional tests to sum into a current result.
+
+The subsequent 609-test source at
+`f264500d2f6ca161af4d72dc81583c53a483407b`, aggregate
+`1d333de4964e89991ae6139a852cea1cae9d1e69b2a8256cf209f32076adb217`,
+passed its MSVC CI/archive gate and production comparison sessions. Its
+immutable MSVC executable hash was
+`8bbe5f3945b5abd2843199ce37a4e9304f17894e3da0f0330a919925e1a25802`.
+Those sessions exposed the CPU clock compatibility gap corrected above. Their
+artifacts and observations are retained as historical evidence; they are not
+the current source, a feature-parity claim or a substitute for a new matched
+comparison of the corrected candidate.
 
 The intermediate 600-test source aggregate
 `645ab21d28fee360e1927fe0e4c7a3102de692dabadcf5b4ae7af7eb4c017a55`,

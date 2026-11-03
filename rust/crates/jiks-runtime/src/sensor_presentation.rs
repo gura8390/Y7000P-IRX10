@@ -83,22 +83,42 @@ pub(crate) fn apply(
         "ShowCpuAverageFrequency",
         false,
     );
-    let source_key = if average {
-        "CpuAverageFrequency"
-    } else {
-        "CpuMaxFrequency"
+    // The original V2 dashboard/status frequency is P-only on a hybrid CPU.
+    // Classification is physical-core metadata, independent of a missing/late
+    // clock reading; never infer it from the highest reported MHz or LP order.
+    let hybrid = cache
+        .get("intel")
+        .and_then(|v| v.get("cores"))
+        .and_then(Value::as_array)
+        .is_some_and(|cores| {
+            cores.iter().any(|c| {
+                c.get("address")
+                    .and_then(|a| a.get("kind"))
+                    .and_then(Value::as_str)
+                    == Some("Performance")
+            })
+        });
+    let source_key = match (hybrid, average) {
+        (true, true) => "CpuPAverageFrequency",
+        (true, false) => "CpuPMaxFrequency",
+        (false, true) => "CpuAverageFrequency",
+        (false, false) => "CpuMaxFrequency",
+    };
+    let label = match (hybrid, average) {
+        (true, true) => "CPU P核平均频率",
+        (true, false) => "CPU P核最高频率",
+        (false, true) => "CPU 平均频率",
+        (false, false) => "CPU 最高频率",
     };
     if let Some(source) = metrics.iter().find(|m| m.key == source_key).cloned() {
+        replace(metrics, "CpuFrequency", label, source.value, &source.detail);
+    } else if hybrid {
         replace(
             metrics,
             "CpuFrequency",
-            if average {
-                "CPU 平均频率"
-            } else {
-                "CPU 最高频率"
-            },
-            source.value,
-            &source.detail,
+            label,
+            "—".into(),
+            "已识别P核；所选P核频率没有有效样本，未用E核或Windows报告值代替",
         );
     }
     let temp = selection(
@@ -377,6 +397,86 @@ mod tests {
                     .value,
                 expected
             );
+        }
+    }
+    #[test]
+    fn hybrid_frequency_preferences_select_only_p_core_metrics() {
+        let mut raw = cache();
+        raw.get_mut("intel").unwrap()["cores"] = json!([
+            {"address":{"physical_id":47,"kind":"Efficiency"}},
+            {"address":{"physical_id":8,"kind":"Performance"}},
+            {"address":{"physical_id":0,"kind":"Performance"}}
+        ]);
+        for (average, expected, label) in [
+            (false, "5000 MHz", "CPU P核最高频率"),
+            (true, "4900 MHz", "CPU P核平均频率"),
+        ] {
+            let mut metrics = [
+                ("CpuMaxFrequency", "9000 MHz"),
+                ("CpuAverageFrequency", "6300 MHz"),
+                ("CpuPMaxFrequency", "5000 MHz"),
+                ("CpuPAverageFrequency", "4900 MHz"),
+            ]
+            .into_iter()
+            .map(|(key, value)| Metric {
+                key: key.into(),
+                value: value.into(),
+                detail: format!("source {key}"),
+                ..Default::default()
+            })
+            .collect();
+            apply(
+                &mut metrics,
+                &raw,
+                &docs(json!({"ShowCpuAverageFrequency":average}), "C"),
+            );
+            let selected = metrics.iter().find(|m| m.key == "CpuFrequency").unwrap();
+            assert_eq!(selected.value, expected);
+            assert_eq!(selected.label, label);
+            assert!(selected.detail.contains(if average {
+                "CpuPAverageFrequency"
+            } else {
+                "CpuPMaxFrequency"
+            }));
+            assert_eq!(
+                metrics
+                    .iter()
+                    .find(|m| m.key == "CpuMaxFrequency")
+                    .unwrap()
+                    .value,
+                "9000 MHz"
+            );
+        }
+    }
+    #[test]
+    fn classified_p_cores_without_a_clock_never_use_e_core_or_os_fallback() {
+        let mut raw = cache();
+        raw.get_mut("intel").unwrap()["cores"] = json!([
+            {"address":{"kind":"Performance"},"ratio_frequency_mhz":null},
+            {"address":{"kind":"Efficiency"},"ratio_frequency_mhz":9000}
+        ]);
+        // A late snapshot still identifies the physical kind; it cannot make
+        // an OS value masquerade as a current P-core reading.
+        raw.get_mut("intel").unwrap()["completed_at_tick_ms"] = json!(5000);
+        for average in [false, true] {
+            let mut metrics = vec![Metric {
+                key: if average {
+                    "CpuAverageFrequency"
+                } else {
+                    "CpuMaxFrequency"
+                }
+                .into(),
+                value: "2200 MHz".into(),
+                ..Default::default()
+            }];
+            apply(
+                &mut metrics,
+                &raw,
+                &docs(json!({"ShowCpuAverageFrequency":average}), "C"),
+            );
+            let selected = metrics.iter().find(|m| m.key == "CpuFrequency").unwrap();
+            assert_eq!(selected.value, "—");
+            assert!(selected.detail.contains("未用E核或Windows"));
         }
     }
 }

@@ -1720,6 +1720,25 @@ fn project_metrics(b: &mut Builder<'_>, cache: &BTreeMap<String, Value>) {
             if !values.is_empty() {
                 let avg = values.iter().sum::<f64>() / values.len() as f64;
                 let max = values.iter().copied().reduce(f64::max).unwrap();
+                let references = sample
+                    .cores
+                    .iter()
+                    .filter(|c| kind.is_none_or(|kind| c.address.kind == kind))
+                    .filter(|c| {
+                        c.ratio_frequency_mhz
+                            .is_some_and(|v| v.is_finite() && v > 0.0)
+                    })
+                    .filter_map(|c| c.frequency_reference)
+                    .map(|r| r.description())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(" / ");
+                let reference_detail = if references.is_empty() {
+                    "频率快照未记录reference来源".to_owned()
+                } else {
+                    references
+                };
                 for (key, title, value) in [
                     (maxkey, format!("{label}最高频率"), max),
                     (avgkey, format!("{label}平均频率"), avg),
@@ -1732,7 +1751,10 @@ fn project_metrics(b: &mut Builder<'_>, cache: &BTreeMap<String, Value>) {
                         } else {
                             format!("{value:.0} MHz")
                         },
-                        format!("{}；MSR倍频×CPUID总线MHz；非effective clock", detail),
+                        format!(
+                            "{}；PERF_STATUS倍频 × {reference_detail}；非effective clock",
+                            detail
+                        ),
                     );
                 }
             }
@@ -2471,6 +2493,116 @@ mod tests {
                 .value,
             "—"
         );
+    }
+    fn clock_fixture_cache() -> BTreeMap<String, Value> {
+        let core = |id: u32, kind: &str, clock: Option<f64>| {
+            json!({
+                "address":{"physical_id":id,"logical_processor":id,"kind":kind,"bus_frequency_mhz":null,"tsc_frequency_mhz":2419.2},
+                "ratio_frequency_mhz":clock,
+                "frequency_reference":{"bus_mhz":100.8,"source":"Cpuid15PlatformInfo"}
+            })
+        };
+        BTreeMap::from([
+            (
+                "telemetry".into(),
+                json!({"os_reported_frequency_mhz":2200,"per_cpu_os_reported_mhz":[2200,2200]}),
+            ),
+            (
+                "intel".into(),
+                json!({"requested_at_tick_ms":100,"completed_at_tick_ms":101,
+                "cores":[core(47,"Efficiency",Some(9000.0)),core(8,"Performance",Some(5000.0)),core(0,"Performance",None),core(4,"Performance",Some(4800.0))],
+                "source":"readonly clock fixture","errors":[]}),
+            ),
+        ])
+    }
+    fn apply_clock_preferences(
+        metrics: &mut Vec<Metric>,
+        cache: &BTreeMap<String, Value>,
+        average: bool,
+    ) {
+        use jiks_core::settings::SettingsDocument;
+        crate::sensor_presentation::apply(
+            metrics,
+            cache,
+            &SettingsDocument::parse(r#"{"EnableHardwareSensors":true}"#).unwrap(),
+            &SettingsDocument::parse(&json!({"ShowCpuAverageFrequency":average}).to_string())
+                .unwrap(),
+        );
+    }
+    #[test]
+    fn native_clock_overrides_os_fallback_and_hybrid_average_counts_only_valid_physical_p_cores() {
+        // Non-contiguous IDs and shuffled order guard against LP weighting or
+        // selecting the fastest core as an invented P-core classifier.
+        let cache = clock_fixture_cache();
+        for (average, expected) in [(false, "5000 MHz"), (true, "4900 MHz")] {
+            let mut metrics = project(&cache, false, None).metrics;
+            assert_eq!(
+                metrics
+                    .iter()
+                    .filter(|m| m.key == "CpuMaxFrequency")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                metrics
+                    .iter()
+                    .find(|m| m.key == "CpuMaxFrequency")
+                    .unwrap()
+                    .value,
+                "9000 MHz"
+            );
+            assert_eq!(
+                metrics
+                    .iter()
+                    .find(|m| m.key == "CpuAverageFrequency")
+                    .unwrap()
+                    .value,
+                "6267 MHz"
+            );
+            apply_clock_preferences(&mut metrics, &cache, average);
+            let selected = metrics.iter().find(|m| m.key == "CpuFrequency").unwrap();
+            assert_eq!(selected.value, expected);
+            assert!(
+                selected
+                    .detail
+                    .contains("CPUID.15H invariant TSC / MSR_PLATFORM_INFO[15:8] = 100.800 MHz")
+            );
+            assert!(selected.detail.contains("非effective clock"));
+        }
+    }
+    #[test]
+    fn absent_or_late_p_clock_is_unknown_but_absent_native_provider_preserves_honest_os_fallback() {
+        let mut missing = clock_fixture_cache();
+        for core in missing.get_mut("intel").unwrap()["cores"]
+            .as_array_mut()
+            .unwrap()
+        {
+            if core["address"]["kind"] == "Performance" {
+                core["ratio_frequency_mhz"] = Value::Null;
+            }
+        }
+        let mut late = clock_fixture_cache();
+        late.get_mut("intel").unwrap()["completed_at_tick_ms"] = json!(5000);
+        for cache in [&missing, &late] {
+            for average in [false, true] {
+                let mut metrics = project(cache, false, None).metrics;
+                apply_clock_preferences(&mut metrics, cache, average);
+                assert_eq!(
+                    metrics
+                        .iter()
+                        .find(|m| m.key == "CpuFrequency")
+                        .unwrap()
+                        .value,
+                    "—"
+                );
+            }
+        }
+        missing.remove("intel");
+        let mut metrics = project(&missing, false, None).metrics;
+        apply_clock_preferences(&mut metrics, &missing, false);
+        let os = metrics.iter().find(|m| m.key == "CpuFrequency").unwrap();
+        assert_eq!(os.value, "2200 MHz");
+        assert!(os.detail.contains("Windows报告MHz"));
     }
     #[test]
     fn hybrid_requires_completed_companion_getters_and_never_infers_uma() {

@@ -35,17 +35,19 @@ const THERMAL_TARGET: u32 = 0x1a2;
 const CORE_THERMAL: u32 = 0x19c;
 const PACKAGE_THERMAL: u32 = 0x1b1;
 const PERF_STATUS: u32 = 0x198;
+const PLATFORM_INFO: u32 = 0xce;
 const RAPL_UNIT: u32 = 0x606;
 const PACKAGE_ENERGY: u32 = 0x611;
 const CORE_ENERGY: u32 = 0x639;
 const DRAM_ENERGY: u32 = 0x619;
 const PLATFORM_ENERGY: u32 = 0x64d;
 const GPU_ENERGY: u32 = 0x641;
-const ALLOWED: [u32; 10] = [
+const ALLOWED: [u32; 11] = [
     THERMAL_TARGET,
     CORE_THERMAL,
     PACKAGE_THERMAL,
     PERF_STATUS,
+    PLATFORM_INFO,
     RAPL_UNIT,
     PACKAGE_ENERGY,
     CORE_ENERGY,
@@ -66,6 +68,30 @@ pub struct CoreAddress {
     pub logical_processor: u32,
     pub kind: CoreKind,
     pub bus_frequency_mhz: Option<u32>,
+    /// CPUID.15H crystal frequency × numerator / denominator, with invariant TSC.
+    #[serde(default)]
+    pub tsc_frequency_mhz: Option<f64>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FrequencyReferenceSource {
+    Cpuid15PlatformInfo,
+    Cpuid16,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct FrequencyReference {
+    pub bus_mhz: f64,
+    pub source: FrequencyReferenceSource,
+}
+impl FrequencyReference {
+    pub fn description(self) -> String {
+        let source = match self.source {
+            FrequencyReferenceSource::Cpuid15PlatformInfo => {
+                "CPUID.15H invariant TSC / MSR_PLATFORM_INFO[15:8]"
+            }
+            FrequencyReferenceSource::Cpuid16 => "CPUID.16H reference bus",
+        };
+        format!("{source} = {:.3} MHz", self.bus_mhz)
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreSample {
@@ -74,6 +100,8 @@ pub struct CoreSample {
     pub distance_to_tjmax_celsius: Option<f64>,
     pub tjmax_celsius: Option<f64>,
     pub ratio_frequency_mhz: Option<f64>,
+    #[serde(default)]
+    pub frequency_reference: Option<FrequencyReference>,
     pub requested_vid_volts: Option<f64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +161,54 @@ struct EnergyPoint {
 #[derive(Default)]
 pub struct SensorHistory {
     energy: BTreeMap<u32, EnergyPoint>,
+    // One package on the supported machine. Cache only a valid read-only ratio;
+    // failures remain observable and can be retried without poisoning the cache.
+    platform_info: Option<u64>,
+}
+
+fn tsc_mhz_from_cpuid15(
+    denominator: u32,
+    numerator: u32,
+    crystal_hz: u32,
+    invariant_tsc: bool,
+) -> Option<f64> {
+    if !invariant_tsc || denominator == 0 || numerator == 0 || crystal_hz == 0 {
+        return None;
+    }
+    let mhz = crystal_hz as f64 * numerator as f64 / denominator as f64 / 1_000_000.0;
+    mhz.is_finite()
+        .then_some(mhz)
+        .filter(|v| (100.0..=20000.0).contains(v))
+}
+fn frequency_reference(
+    core: &CoreAddress,
+    platform_info: Option<u64>,
+) -> Option<FrequencyReference> {
+    // Match the original LHM's TSC/platform-ratio equation without its startup
+    // spin calibration: this machine enumerates the complete TSC ratio/crystal.
+    if let Some(bus_mhz) = core
+        .tsc_frequency_mhz
+        .filter(|v| v.is_finite() && (100.0..=20000.0).contains(v))
+        .zip(platform_info.map(|v| (v >> 8) & 0xff).filter(|v| *v > 0))
+        .map(|(tsc, ratio)| tsc / ratio as f64)
+        .filter(|v| v.is_finite() && (1.0..=1000.0).contains(v))
+    {
+        return Some(FrequencyReference {
+            bus_mhz,
+            source: FrequencyReferenceSource::Cpuid15PlatformInfo,
+        });
+    }
+    core.bus_frequency_mhz
+        .filter(|v| (1..=1000).contains(v))
+        .map(|bus| FrequencyReference {
+            bus_mhz: bus as f64,
+            source: FrequencyReferenceSource::Cpuid16,
+        })
+}
+fn ratio_frequency(status: u64, reference: FrequencyReference) -> Option<f64> {
+    let ratio = (status >> 8) & 0xff;
+    let mhz = ratio as f64 * reference.bus_mhz;
+    (ratio > 0 && mhz.is_finite() && (1.0..=20000.0).contains(&mhz)).then_some(mhz)
 }
 
 pub fn decode_temperature(target: u64, status: u64) -> Option<(f64, f64, f64)> {
@@ -191,6 +267,13 @@ pub fn sample_with(
     let requested = reader.tick_ms();
     let mut errors = Vec::new();
     let mut samples = Vec::new();
+    if history.platform_info.is_none() && cores.iter().any(|c| c.tsc_frequency_mhz.is_some()) {
+        match reader.read(&cores[0], PLATFORM_INFO) {
+            Ok(value) if ((value >> 8) & 0xff) > 0 => history.platform_info = Some(value),
+            Ok(_) => errors.push("MSR_PLATFORM_INFO returned a zero TSC ratio".into()),
+            Err(e) => errors.push(format!("MSR_PLATFORM_INFO: {e:#}")),
+        }
+    }
     for core in cores {
         let target = reader.read(core, THERMAL_TARGET);
         let thermal = reader.read(core, CORE_THERMAL);
@@ -209,19 +292,31 @@ pub fn sample_with(
                 errors.push(format!("core{} {name}: {e:#}", core.physical_id));
             }
         }
-        let ratio = perf
+        let reference = frequency_reference(core, history.platform_info);
+        if reference.is_none() {
+            errors.push(format!(
+                "core{} frequency reference unavailable (CPUID.15H/platform ratio and CPUID.16H)",
+                core.physical_id
+            ));
+        }
+        let frequency = perf
             .as_ref()
             .ok()
-            .map(|v| (v >> 8) & 0xff)
-            .filter(|v| *v > 0);
+            .zip(reference)
+            .and_then(|(v, r)| ratio_frequency(*v, r));
+        if perf.is_ok() && reference.is_some() && frequency.is_none() {
+            errors.push(format!(
+                "core{} PERF_STATUS frequency ratio is zero/out of range",
+                core.physical_id
+            ));
+        }
         samples.push(CoreSample {
             address: core.clone(),
             temperature_celsius: temperatures.map(|v| v.0),
             distance_to_tjmax_celsius: temperatures.map(|v| v.1),
             tjmax_celsius: temperatures.map(|v| v.2),
-            ratio_frequency_mhz: ratio
-                .zip(core.bus_frequency_mhz)
-                .map(|(r, b)| r as f64 * b as f64),
+            ratio_frequency_mhz: frequency,
+            frequency_reference: reference,
             requested_vid_volts: perf.ok().and_then(decode_vid),
         });
     }
@@ -264,7 +359,7 @@ pub fn sample_with(
         }
     }
     let max = maximum(samples.iter().filter_map(|c| c.temperature_celsius));
-    Ok(IntelSample{requested_at_tick_ms:requested,completed_at_tick_ms:reader.tick_ms(),maximum_core_temperature_celsius:max,average_core_temperature_celsius:mean(samples.iter().filter_map(|c|c.temperature_celsius)),conservative_temperature_celsius:maximum(max.into_iter().chain(package)),package_temperature_celsius:package,package_power_watts:powers.get(&PACKAGE_ENERGY).copied(),core_power_watts:powers.get(&CORE_ENERGY).copied(),dram_power_watts:powers.get(&DRAM_ENERGY).copied(),platform_power_watts:powers.get(&PLATFORM_ENERGY).copied(),power_interval_start_tick_ms:interval_start,core_vid_average_volts:mean(samples.iter().filter_map(|c|c.requested_vid_volts)),core_vid_maximum_volts:maximum(samples.iter().filter_map(|c|c.requested_vid_volts)),cores:samples,errors,source:"PawnIO 0.2.11 IntelMSR readonly; Intel DTS core/package, RAPL 32-bit energy deltas, requested VID (not measured Vcore), PERF_STATUS ratio × CPUID bus MHz (not effective clock)".into()})
+    Ok(IntelSample{requested_at_tick_ms:requested,completed_at_tick_ms:reader.tick_ms(),maximum_core_temperature_celsius:max,average_core_temperature_celsius:mean(samples.iter().filter_map(|c|c.temperature_celsius)),conservative_temperature_celsius:maximum(max.into_iter().chain(package)),package_temperature_celsius:package,package_power_watts:powers.get(&PACKAGE_ENERGY).copied(),core_power_watts:powers.get(&CORE_ENERGY).copied(),dram_power_watts:powers.get(&DRAM_ENERGY).copied(),platform_power_watts:powers.get(&PLATFORM_ENERGY).copied(),power_interval_start_tick_ms:interval_start,core_vid_average_volts:mean(samples.iter().filter_map(|c|c.requested_vid_volts)),core_vid_maximum_volts:maximum(samples.iter().filter_map(|c|c.requested_vid_volts)),cores:samples,errors,source:"PawnIO 0.2.11 IntelMSR readonly; Intel DTS core/package, RAPL 32-bit energy deltas, requested VID (not measured Vcore), PERF_STATUS ratio × validated reference bus (not effective clock)".into()})
 }
 
 fn read_packet(index: u32) -> Result<[u8; 40]> {
@@ -442,11 +537,15 @@ fn topology() -> Result<Vec<CoreAddress>> {
             _ => CoreKind::Unknown,
         };
         let bus = cpuid(0x16, 0).ecx & 0xffff;
+        let invariant_tsc =
+            cpuid(0x80000000, 0).eax >= 0x80000007 && cpuid(0x80000007, 0).edx & (1 << 8) != 0;
+        let tsc = cpuid(0x15, 0);
         cores.push(CoreAddress {
             physical_id,
             logical_processor: logical,
             kind,
             bus_frequency_mhz: (bus > 0 && bus <= 1000).then_some(bus),
+            tsc_frequency_mhz: tsc_mhz_from_cpuid15(tsc.eax, tsc.ebx, tsc.ecx, invariant_tsc),
         });
     }
     Ok(cores)
@@ -530,11 +629,13 @@ mod tests {
             logical_processor: id,
             kind,
             bus_frequency_mhz: Some(100),
+            tsc_frequency_mhz: None,
         }
     }
     #[test]
     fn fixed_packet_cannot_encode_a_setter_or_power_limit_register() {
         assert!(read_packet(GPU_ENERGY).is_ok());
+        assert!(read_packet(PLATFORM_INFO).is_ok());
         let p = read_packet(0x19c).unwrap();
         assert_eq!(&p[..15], b"ioctl_read_msr\0");
         assert_eq!(u64::from_le_bytes(p[32..40].try_into().unwrap()), 0x19c);
@@ -544,6 +645,133 @@ mod tests {
         assert_eq!(IOCTL_LOAD, 0xa1b22084);
         assert_eq!(IOCTL_EXECUTE, 0xa1b22104);
         assert_eq!(MODULE.len(), 5324);
+    }
+    #[test]
+    fn complete_cpuid15_tsc_ratio_retains_fractional_reference_bus() {
+        let tsc = tsc_mhz_from_cpuid15(2, 126, 38_400_000, true).unwrap();
+        assert!((tsc - 2419.2).abs() < 1e-9);
+        let mut c = core(0, CoreKind::Performance);
+        c.tsc_frequency_mhz = Some(tsc);
+        // Prefer the original TSC/platform equation even when a rounded CPUID16
+        // reference exists; never round 100.8 to 100 before multiplying.
+        let reference = frequency_reference(&c, Some(24 << 8)).unwrap();
+        assert_eq!(
+            reference.source,
+            FrequencyReferenceSource::Cpuid15PlatformInfo
+        );
+        assert!((reference.bus_mhz - 100.8).abs() < 1e-9);
+        assert!((ratio_frequency(52 << 8, reference).unwrap() - 5241.6).abs() < 1e-9);
+        assert!(reference.description().contains("100.800 MHz"));
+    }
+    #[test]
+    fn absent_invalid_or_non_invariant_tsc_is_never_a_reference() {
+        for (d, n, hz, invariant) in [
+            (0, 126, 38_400_000, true),
+            (2, 0, 38_400_000, true),
+            (2, 126, 0, true),
+            (2, 126, 38_400_000, false),
+            (1, u32::MAX, u32::MAX, true),
+        ] {
+            assert!(tsc_mhz_from_cpuid15(d, n, hz, invariant).is_none());
+        }
+        let mut c = core(0, CoreKind::Performance);
+        c.bus_frequency_mhz = None;
+        for tsc in [None, Some(f64::NAN), Some(f64::INFINITY), Some(-1.0)] {
+            c.tsc_frequency_mhz = tsc;
+            assert!(frequency_reference(&c, Some(24 << 8)).is_none());
+        }
+    }
+    #[test]
+    fn missing_platform_ratio_uses_only_a_valid_explicit_cpuid16_fallback() {
+        let mut c = core(0, CoreKind::Performance);
+        c.tsc_frequency_mhz = Some(2419.2);
+        for platform in [None, Some(0)] {
+            let reference = frequency_reference(&c, platform).unwrap();
+            assert_eq!(reference.source, FrequencyReferenceSource::Cpuid16);
+            assert_eq!(reference.bus_mhz, 100.0);
+        }
+        for bus in [None, Some(0), Some(1001)] {
+            c.bus_frequency_mhz = bus;
+            assert!(frequency_reference(&c, None).is_none());
+        }
+        let reference = FrequencyReference {
+            bus_mhz: 1000.0,
+            source: FrequencyReferenceSource::Cpuid16,
+        };
+        assert!(ratio_frequency(0, reference).is_none());
+        assert!(ratio_frequency(255 << 8, reference).is_none());
+    }
+    #[test]
+    fn zero_cpuid16_on_this_machine_uses_one_cached_readonly_platform_ratio() {
+        let mut c = core(0, CoreKind::Performance);
+        c.bus_frequency_mhz = None;
+        c.tsc_frequency_mhz = Some(2419.2);
+        let mut reader = Fake {
+            tick: 100,
+            reads: vec![],
+            values: BTreeMap::from([
+                ((0, PLATFORM_INFO), 0x0004083DF1811800),
+                ((0, PERF_STATUS), 0x000028BE00003400),
+            ]),
+        };
+        let mut history = SensorHistory::default();
+        let first = sample_with(&mut reader, &[c.clone()], &mut history).unwrap();
+        assert!((first.cores[0].ratio_frequency_mhz.unwrap() - 5241.6).abs() < 1e-9);
+        assert_eq!(
+            first.cores[0].frequency_reference.unwrap().source,
+            FrequencyReferenceSource::Cpuid15PlatformInfo
+        );
+        reader.values.insert((0, PERF_STATUS), 58 << 8);
+        let next = sample_with(&mut reader, &[c], &mut history).unwrap();
+        assert!((next.cores[0].ratio_frequency_mhz.unwrap() - 5846.4).abs() < 1e-9);
+        assert_eq!(
+            reader.reads.iter().filter(|r| **r == PLATFORM_INFO).count(),
+            1
+        );
+        assert!(reader.reads.iter().all(|id| ALLOWED.contains(id)));
+    }
+    #[test]
+    fn failed_or_zero_platform_read_remains_unknown_and_can_recover() {
+        let mut c = core(0, CoreKind::Performance);
+        c.bus_frequency_mhz = None;
+        c.tsc_frequency_mhz = Some(2419.2);
+        let mut reader = Fake {
+            tick: 100,
+            reads: vec![],
+            values: BTreeMap::from([((0, PERF_STATUS), 52 << 8)]),
+        };
+        let mut history = SensorHistory::default();
+        let failed = sample_with(&mut reader, &[c.clone()], &mut history).unwrap();
+        assert!(failed.cores[0].ratio_frequency_mhz.is_none());
+        assert!(
+            failed
+                .errors
+                .iter()
+                .any(|e| e.contains("MSR_PLATFORM_INFO"))
+        );
+        assert!(history.platform_info.is_none());
+        reader.values.insert((0, PLATFORM_INFO), 0);
+        let zero = sample_with(&mut reader, &[c.clone()], &mut history).unwrap();
+        assert!(zero.cores[0].ratio_frequency_mhz.is_none());
+        assert!(zero.errors.iter().any(|e| e.contains("zero TSC ratio")));
+        assert!(history.platform_info.is_none());
+        reader.values.insert((0, PLATFORM_INFO), 24 << 8);
+        assert!(
+            sample_with(&mut reader, &[c], &mut history).unwrap().cores[0]
+                .ratio_frequency_mhz
+                .is_some()
+        );
+    }
+    #[test]
+    fn legacy_serialized_samples_keep_backward_compatible_clock_metadata() {
+        let c: CoreSample = serde_json::from_value(serde_json::json!({
+            "address":{"physical_id":0,"logical_processor":0,"kind":"Performance","bus_frequency_mhz":100},
+            "temperature_celsius":null,"distance_to_tjmax_celsius":null,"tjmax_celsius":null,
+            "ratio_frequency_mhz":4400,"requested_vid_volts":null
+        })).unwrap();
+        assert_eq!(c.ratio_frequency_mhz, Some(4400.0));
+        assert!(c.address.tsc_frequency_mhz.is_none());
+        assert!(c.frequency_reference.is_none());
     }
     #[test]
     fn digital_thermal_valid_bit_tjmax_and_invalid_distance_are_checked() {
@@ -570,7 +798,9 @@ mod tests {
     }
     #[test]
     fn gpu_pp1_power_reads_no_temperature_or_limit_registers() {
-        let core = core(0, CoreKind::Performance);
+        let mut core = core(0, CoreKind::Performance);
+        core.bus_frequency_mhz = None;
+        core.tsc_frequency_mhz = Some(2419.2);
         let mut fake = Fake {
             values: BTreeMap::from([((0, RAPL_UNIT), 14 << 8), ((0, GPU_ENERGY), 0)]),
             tick: 100,
@@ -622,6 +852,7 @@ mod tests {
         assert_eq!(a.cores[0].ratio_frequency_mhz, Some(4400.0));
         assert!(a.package_power_watts.is_none());
         assert!(a.cores[1].temperature_celsius.is_none());
+        assert!(a.cores[1].ratio_frequency_mhz.is_none());
         f.tick = 1100;
         f.values.insert((0, PACKAGE_ENERGY), 10000 + 1638400);
         let b = sample_with(&mut f, &cores, &mut h).unwrap();
