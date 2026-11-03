@@ -1084,6 +1084,15 @@ mod tests {
         assert_eq!(unsafe { IsWindowVisible(hwnd) }, 0);
         overlay.update_accessibility(hwnd, true);
         let before = a11y::read_for_test(&[hwnd]).unwrap();
+        assert!((1..=5).contains(&before[0].element_lookup_attempts));
+        assert_eq!(
+            before[0].first_lookup_error.is_some(),
+            before[0].element_lookup_attempts > 1
+        );
+        eprintln!(
+            "OSD initial native lookup: attempts={}, first_error={:?}",
+            before[0].element_lookup_attempts, before[0].first_lookup_error
+        );
         assert_eq!(before[0].id, "osd");
         assert!(before[0].name.contains("CPU 温度: 45 °C"));
         assert!(!before[0].invoke);

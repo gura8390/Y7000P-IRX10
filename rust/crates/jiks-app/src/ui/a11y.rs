@@ -373,6 +373,8 @@ pub(super) struct Probe {
     pub read_only: Option<bool>,
     pub toggle: Option<i32>,
     pub invoke: bool,
+    pub element_lookup_attempts: usize,
+    pub first_lookup_error: Option<String>,
 }
 /// Formal UIA reads of exact HWNDs created by the calling test. The UI thread
 /// keeps pumping while an independent, windowless MTA client obtains properties.
@@ -383,11 +385,37 @@ pub(super) fn read_for_test(handles: &[HWND]) -> Result<Vec<Probe>> {
         Win32::{System::Com::COINIT_MULTITHREADED, UI::Accessibility::*},
         core::Interface,
     };
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
+    let expected_thread = unsafe { GetCurrentThreadId() };
+    let expected_process = unsafe { GetCurrentProcessId() };
+    // These annotations/windows belong to this test's current UI apartment.
+    // Validate the allocation generation again after the pumped COM reads so a
+    // retired/reused HWND can never be accepted as the original target.
+    let owners: Vec<Owner> = handles
+        .iter()
+        .map(|hwnd| unsafe {
+            let mut pointer = 0usize;
+            ensure!(
+                GetWindowSubclass(*hwnd, Some(subclass), SUBCLASS, &mut pointer) != 0
+                    && pointer != 0,
+                "UIA test reader requires a currently owned annotated HWND"
+            );
+            ensure!(
+                GetWindowThreadProcessId(*hwnd, null_mut()) == expected_thread,
+                "UIA test reader requires the test's own UI-thread HWND"
+            );
+            Ok(Owner {
+                pointer,
+                generation: (*(pointer as *const Annotation)).generation,
+            })
+        })
+        .collect::<Result<_>>()?;
     let handles: Vec<(usize, Option<String>)> = handles
         .iter()
         .map(|handle| (*handle as usize, identity(*handle)))
         .collect();
+    let expected_handles = handles.clone();
     let reader = std::thread::spawn(move || -> Result<Vec<Probe>> {
         unsafe {
             CoInitializeEx(None, COINIT_MULTITHREADED)
@@ -420,9 +448,32 @@ pub(super) fn read_for_test(handles: &[HWND]) -> Result<Vec<Probe>> {
             .map(|(handle, semantic_id)| -> Result<Probe> {
                 let read = || -> Result<Probe> {
                     unsafe {
-                        let element = client
-                            .ElementFromHandle(ComHwnd(handle as HWND))
-                            .context("ElementFromHandle")?;
+                        let mut element_lookup_attempts = 0;
+                        let mut first_lookup_error = None;
+                        let element = loop {
+                            let mut process = 0;
+                            ensure!(IsWindow(handle as HWND) != 0
+                                && GetWindowThreadProcessId(handle as HWND, &mut process) == expected_thread
+                                && process == expected_process,
+                                "Exact test HWND owner/lifetime changed before ElementFromHandle");
+                            element_lookup_attempts += 1;
+                            match client.ElementFromHandle(ComHwnd(handle as HWND)) {
+                                Ok(element) => break element,
+                                Err(error) => {
+                                    if first_lookup_error.is_none() {
+                                        first_lookup_error = Some(error.to_string());
+                                    }
+                                    eprintln!("UIA ElementFromHandle HWND {handle:#x} annotation {semantic_id:?}, attempt {element_lookup_attempts}/5: {error}");
+                                    if error.code() != windows::Win32::Foundation::E_FAIL || element_lookup_attempts == 5 {
+                                        return Err(error).with_context(|| format!("ElementFromHandle after {element_lookup_attempts} read-only attempt(s); first failure: {}", first_lookup_error.as_deref().unwrap_or("unavailable")));
+                                    }
+                                    // A diagnostic bound, not a readiness claim:
+                                    // only E_FAIL and the exact same HWND/owner
+                                    // are re-read. Persistent errors still fail.
+                                    std::thread::sleep(std::time::Duration::from_millis(20));
+                                }
+                            }
+                        };
                         let value = element
                             .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
                             .ok();
@@ -474,6 +525,8 @@ pub(super) fn read_for_test(handles: &[HWND]) -> Result<Vec<Probe>> {
                                     UIA_InvokePatternId,
                                 )
                                 .is_ok(),
+                            element_lookup_attempts,
+                            first_lookup_error,
                         })
                     }
                 };
@@ -493,9 +546,16 @@ pub(super) fn read_for_test(handles: &[HWND]) -> Result<Vec<Probe>> {
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    reader
+    let result = reader
         .join()
-        .map_err(|_| anyhow::anyhow!("UIA reader panicked"))?
+        .map_err(|_| anyhow::anyhow!("UIA reader panicked"))?;
+    for ((handle, _), owner) in expected_handles.iter().zip(owners) {
+        ensure!(
+            current(*handle as HWND, owner),
+            "Exact annotated test HWND generation was retired/reused during UIA reads"
+        );
+    }
+    result
 }
 
 #[cfg(test)]
