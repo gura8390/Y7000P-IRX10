@@ -141,6 +141,306 @@ fn action_key(action: &Action) -> String {
     format!("{}.{}", action.accessibility_role, command)
 }
 static REQUEST: AtomicU64 = AtomicU64::new(1);
+#[derive(Debug, PartialEq, Eq)]
+struct RestoredWindow {
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+}
+fn window_restore_preferences(model: &std::sync::Mutex<UiModel>) -> Option<(bool, Value)> {
+    let model = model.lock().ok()?;
+    let geometry = model.values.get("app.window")?;
+    if !geometry.is_object() {
+        return None;
+    }
+    Some((
+        model.values.get("app.remember_position")?.as_bool()?,
+        geometry.clone(),
+    ))
+}
+fn saved_window_size(geometry: &Value) -> Option<(f64, f64)> {
+    let width = geometry.pointer("/size/Width")?.as_f64()?;
+    let height = geometry.pointer("/size/Height")?.as_f64()?;
+    (width.is_finite()
+        && height.is_finite()
+        && width > 0.
+        && height > 0.
+        && width <= 8192.
+        && height <= 8192.)
+        .then_some((width, height))
+}
+fn saved_window_position(geometry: &Value, remember: bool) -> Option<(f64, f64)> {
+    if !remember {
+        return None;
+    }
+    let left = geometry.pointer("/position/Left")?.as_f64()?;
+    let top = geometry.pointer("/position/Top")?.as_f64()?;
+    (left.is_finite()
+        && top.is_finite()
+        && (-100000. ..=100000.).contains(&left)
+        && (-100000. ..=100000.).contains(&top))
+    .then_some((left, top))
+}
+/// Saved size is independent of the position preference, as in the original
+/// WPF RestoreSize. Without a usable remembered position, center on the primary
+/// work area; all actual placement remains within the selected monitor's work.
+fn restored_window(
+    geometry: &Value,
+    remember: bool,
+    dpi: u32,
+    work: RECT,
+) -> Option<RestoredWindow> {
+    let (width, height) = saved_window_size(geometry)?;
+    let work_width = work.right.checked_sub(work.left).filter(|n| *n > 0)?;
+    let work_height = work.bottom.checked_sub(work.top).filter(|n| *n > 0)?;
+    let scale = dpi.max(96) as f64 / 96.;
+    let width = (width * scale).round().clamp(
+        (650. * scale).round().min(work_width as f64),
+        work_width as f64,
+    ) as i32;
+    let height = (height * scale).round().clamp(
+        (600. * scale).round().min(work_height as f64),
+        work_height as f64,
+    ) as i32;
+    let (left, top) = saved_window_position(geometry, remember)
+        .map(|(x, y)| ((x * scale).round(), (y * scale).round()))
+        .unwrap_or_else(|| {
+            (
+                work.left as f64 + (work_width - width) as f64 / 2.,
+                work.top as f64 + (work_height - height) as f64 / 2.,
+            )
+        });
+    Some(RestoredWindow {
+        left: left.clamp(work.left as f64, (work.right - width) as f64) as i32,
+        top: top.clamp(work.top as f64, (work.bottom - height) as f64) as i32,
+        width,
+        height,
+    })
+}
+fn window_save_payload(rect: RECT, dpi: u32, remember: bool) -> Option<Value> {
+    if dpi == 0 {
+        return None;
+    }
+    let scale = 96. / dpi as f64;
+    let width = rect.right.checked_sub(rect.left)? as f64 * scale;
+    let height = rect.bottom.checked_sub(rect.top)? as f64 * scale;
+    if width <= 0. || height <= 0. || width > 8192. || height > 8192. {
+        return None;
+    }
+    let mut geometry = json!({"width":width,"height":height});
+    if remember {
+        geometry["left"] = json!(rect.left as f64 * scale);
+        geometry["top"] = json!(rect.top as f64 * scale);
+    }
+    Some(json!({"app.window":geometry}))
+}
+#[cfg(test)]
+mod window_layout_tests {
+    use super::*;
+    fn work() -> RECT {
+        RECT {
+            left: 0,
+            top: 40,
+            right: 1920,
+            bottom: 1080,
+        }
+    }
+    #[test]
+    fn saved_size_restores_without_remembered_or_available_position() {
+        let mut full = UiModel::default();
+        full.values
+            .insert("app.remember_position".into(), json!(false));
+        full.values.insert(
+            "app.window".into(),
+            json!({"size":{"Width":1000,"Height":650}}),
+        );
+        assert!(
+            window_restore_preferences(&std::sync::Mutex::new(full.realtime_snapshot())).is_none(),
+            "lightweight refresh intentionally omits object metadata; restore must use the full model fallback"
+        );
+        assert!(window_restore_preferences(&std::sync::Mutex::new(UiModel::default())).is_none());
+        let (remember, geometry) =
+            window_restore_preferences(&std::sync::Mutex::new(full)).unwrap();
+        assert!(!remember);
+        assert_eq!(
+            restored_window(&geometry, remember, 96, work())
+                .unwrap()
+                .width,
+            1000
+        );
+        let expected = RestoredWindow {
+            left: 460,
+            top: 235,
+            width: 1000,
+            height: 650,
+        };
+        let with_position =
+            json!({"size":{"Width":1000,"Height":650},"position":{"Left":1700,"Top":800}});
+        assert_eq!(
+            restored_window(&with_position, false, 96, work()),
+            Some(expected)
+        );
+        for geometry in [
+            json!({"size":{"Width":1000,"Height":650},"position":null}),
+            json!({"size":{"Width":1000,"Height":650}}),
+            json!({"size":{"Width":1000,"Height":650},"position":{"Left":40}}),
+        ] {
+            let bounds = restored_window(&geometry, true, 96, work()).unwrap();
+            assert_eq!(
+                (bounds.left, bounds.top, bounds.width, bounds.height),
+                (460, 235, 1000, 650)
+            );
+        }
+    }
+    #[test]
+    fn remembered_position_is_clamped_to_the_selected_workarea() {
+        let work = RECT {
+            left: -1920,
+            top: -100,
+            right: 0,
+            bottom: 980,
+        };
+        let geometry =
+            json!({"size":{"Width":1000,"Height":650},"position":{"Left":-100,"Top":1000}});
+        assert_eq!(
+            restored_window(&geometry, true, 96, work),
+            Some(RestoredWindow {
+                left: -1000,
+                top: 330,
+                width: 1000,
+                height: 650
+            })
+        );
+        let geometry =
+            json!({"size":{"Width":1000,"Height":650},"position":{"Left":-3000,"Top":-900}});
+        assert_eq!(
+            restored_window(&geometry, true, 96, work),
+            Some(RestoredWindow {
+                left: -1920,
+                top: -100,
+                width: 1000,
+                height: 650
+            })
+        );
+    }
+    #[test]
+    fn invalid_size_does_not_restore_or_move_the_existing_window() {
+        for size in [
+            Value::Null,
+            json!([]),
+            json!({"Width":1000}),
+            json!({"Width":0,"Height":650}),
+            json!({"Width":-1,"Height":650}),
+            json!({"Width":"NaN","Height":650}),
+            json!({"Width":8193,"Height":650}),
+        ] {
+            let geometry = json!({"size":size,"position":{"Left":20,"Top":40}});
+            assert!(restored_window(&geometry, true, 96, work()).is_none());
+            assert!(restored_window(&geometry, false, 96, work()).is_none());
+        }
+        let enormous: Value =
+            serde_json::from_str(r#"{"size":{"Width":1e9999,"Height":650}}"#).unwrap();
+        assert!(restored_window(&enormous, true, 96, work()).is_none());
+    }
+    #[test]
+    fn saved_size_scales_at_fractional_dpi_and_fits_tiny_workareas() {
+        let geometry = json!({"size":{"Width":799.5,"Height":601.5}});
+        let work = RECT {
+            left: -1280,
+            top: 60,
+            right: 0,
+            bottom: 780,
+        };
+        for (dpi, width, height) in [
+            (96, 800, 602),
+            (120, 999, 720),
+            (144, 1199, 720),
+            (192, 1280, 720),
+        ] {
+            let bounds = restored_window(&geometry, false, dpi, work).unwrap();
+            assert_eq!((bounds.width, bounds.height), (width, height));
+            assert!(bounds.left >= work.left && bounds.top >= work.top);
+            assert!(
+                bounds.left + bounds.width <= work.right
+                    && bounds.top + bounds.height <= work.bottom
+            );
+        }
+        let tiny = RECT {
+            left: 10,
+            top: 20,
+            right: 330,
+            bottom: 260,
+        };
+        assert_eq!(
+            restored_window(&geometry, false, 192, tiny),
+            Some(RestoredWindow {
+                left: 10,
+                top: 20,
+                width: 320,
+                height: 240
+            })
+        );
+        assert!(
+            restored_window(
+                &geometry,
+                false,
+                96,
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 100
+                }
+            )
+            .is_none()
+        );
+    }
+    #[test]
+    fn saving_size_is_independent_of_whether_position_is_remembered() {
+        let rect = RECT {
+            left: 900,
+            top: 60,
+            right: 2400,
+            bottom: 1035,
+        };
+        assert_eq!(
+            window_save_payload(rect, 144, false),
+            Some(json!({"app.window":{"width":1000.,"height":650.}}))
+        );
+        assert_eq!(
+            window_save_payload(rect, 144, true),
+            Some(json!({"app.window":{"left":600.,"top":40.,"width":1000.,"height":650.}}))
+        );
+        assert!(window_save_payload(rect, 0, false).is_none());
+        assert!(
+            window_save_payload(
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 600
+                },
+                96,
+                false
+            )
+            .is_none()
+        );
+        assert!(
+            window_save_payload(
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 9000,
+                    bottom: 600
+                },
+                96,
+                false
+            )
+            .is_none()
+        );
+    }
+}
 fn navigation_target(page: Page, key: u32, ctrl: bool, shift: bool) -> Option<Page> {
     if !ctrl {
         return None;
@@ -2848,52 +3148,45 @@ impl App {
     }
     unsafe fn apply_preferences(&mut self, model: &UiModel) {
         unsafe {
-            if !self.window_restored && model.values.contains_key("app.remember_position") {
-                self.window_restored = true;
-                if model.value("app.remember_position").as_bool() == Some(true) {
-                    let geometry = self
-                        .bridge
-                        .model
-                        .lock()
-                        .ok()
-                        .and_then(|m| m.values.get("app.window").cloned())
-                        .unwrap_or(Value::Null);
-                    if let (Some(x), Some(y), Some(w), Some(h)) = (
-                        geometry.pointer("/position/Left").and_then(Value::as_f64),
-                        geometry.pointer("/position/Top").and_then(Value::as_f64),
-                        geometry.pointer("/size/Width").and_then(Value::as_f64),
-                        geometry.pointer("/size/Height").and_then(Value::as_f64),
-                    ) {
-                        let scale = self.dpi as f64 / 96.;
-                        let mut r = RECT {
-                            left: (x * scale) as i32,
-                            top: (y * scale) as i32,
-                            right: ((x + w) * scale) as i32,
-                            bottom: ((y + h) * scale) as i32,
-                        };
-                        let monitor = MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST);
+            if !self.window_restored {
+                // Realtime snapshots intentionally omit object-valued metadata.
+                // Read both preferences coherently from the full model once,
+                // including when startup keeps the main window minimized.
+                let preferences = window_restore_preferences(&self.bridge.model);
+                if let Some((remember, geometry)) = preferences {
+                    self.window_restored = true;
+                    if let Some((w, h)) = saved_window_size(&geometry) {
+                        let monitor =
+                            if let Some((x, y)) = saved_window_position(&geometry, remember) {
+                                let scale = self.dpi as f64 / 96.;
+                                let rect = RECT {
+                                    left: (x * scale).round() as i32,
+                                    top: (y * scale).round() as i32,
+                                    right: ((x + w) * scale).round() as i32,
+                                    bottom: ((y + h) * scale).round() as i32,
+                                };
+                                MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST)
+                            } else {
+                                // The original centers an independently saved size on
+                                // the primary display when position is not remembered.
+                                MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY)
+                            };
                         let mut info: MONITORINFO = zeroed();
                         info.cbSize = size_of::<MONITORINFO>() as u32;
                         if GetMonitorInfoW(monitor, &mut info) != 0 {
-                            let width = (r.right - r.left).clamp(
-                                self.s(650).min(info.rcWork.right - info.rcWork.left),
-                                info.rcWork.right - info.rcWork.left,
-                            );
-                            let height = (r.bottom - r.top).clamp(
-                                self.s(600).min(info.rcWork.bottom - info.rcWork.top),
-                                info.rcWork.bottom - info.rcWork.top,
-                            );
-                            r.left = r.left.clamp(info.rcWork.left, info.rcWork.right - width);
-                            r.top = r.top.clamp(info.rcWork.top, info.rcWork.bottom - height);
-                            SetWindowPos(
-                                self.hwnd,
-                                null_mut(),
-                                r.left,
-                                r.top,
-                                width,
-                                height,
-                                SWP_NOZORDER | SWP_NOACTIVATE,
-                            );
+                            if let Some(bounds) =
+                                restored_window(&geometry, remember, self.dpi, info.rcWork)
+                            {
+                                SetWindowPos(
+                                    self.hwnd,
+                                    null_mut(),
+                                    bounds.left,
+                                    bounds.top,
+                                    bounds.width,
+                                    bounds.height,
+                                    SWP_NOZORDER | SWP_NOACTIVATE,
+                                );
+                            }
                         }
                     }
                 }
@@ -2975,9 +3268,9 @@ impl App {
     unsafe fn save_window(&mut self) {
         unsafe {
             let model = live_snapshot(&self.bridge);
-            if self.bridge.smoke_close_after.is_some()
+            if !self.window_restored
+                || self.bridge.smoke_close_after.is_some()
                 || model.value("backend.read_only").as_bool() == Some(true)
-                || model.value("app.remember_position").as_bool() != Some(true)
                 || IsIconic(self.hwnd) != 0
                 || IsZoomed(self.hwnd) != 0
             {
@@ -2987,16 +3280,22 @@ impl App {
             if GetWindowRect(self.hwnd, &mut r) == 0 {
                 return;
             }
-            let scale = 96. / self.dpi as f64;
+            let Some(payload) = window_save_payload(
+                r,
+                self.dpi,
+                model.value("app.remember_position").as_bool() == Some(true),
+            ) else {
+                return;
+            };
             if let Err(error) = send(
                 &self.bridge,
                 UiAction::Execute {
                     request_id: request_id(),
                     command: "app.preferences.save".into(),
-                    payload: json!({"app.window":{"left":r.left as f64*scale,"top":r.top as f64*scale,"width":(r.right-r.left) as f64*scale,"height":(r.bottom-r.top) as f64*scale}}),
+                    payload,
                 },
             ) {
-                text(self.notice, &format!("窗口位置尚未保存：{error:#}"));
+                text(self.notice, &format!("窗口大小或位置尚未保存：{error:#}"));
             }
         }
     }

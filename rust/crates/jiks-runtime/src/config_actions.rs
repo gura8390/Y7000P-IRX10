@@ -445,23 +445,29 @@ fn preference(
     }
     let (document, path, entry) = match key {
         "app.window" => {
-            let (left, top, width, height) = (
-                real(v.get("left").context("Window left")?, -100000., 100000.)?,
-                real(v.get("top").context("Window top")?, -100000., 100000.)?,
-                real(v.get("width").context("Window width")?, 300., 8192.)?,
-                real(v.get("height").context("Window height")?, 300., 8192.)?,
-            );
+            let window_number = |key: &str, min: f64, max: f64| -> Result<f64> {
+                let entry = v.get(key).with_context(|| format!("Window {key}"))?;
+                ensure!(
+                    matches!(entry, JsonNode::Number(_)),
+                    "Window {key} must be a number"
+                );
+                real(entry, min, max)
+            };
+            let width = window_number("width", 300., 8192.)?;
+            let height = window_number("height", 300., 8192.)?;
+            let position = match (v.get("left"), v.get("top")) {
+                (None, None) => JsonNode::Null,
+                (Some(_), Some(_)) => {
+                    let left = window_number("left", -100000., 100000.)?;
+                    let top = window_number("top", -100000., 100000.)?;
+                    value(json!({"Left":left,"Top":top}))?
+                }
+                _ => bail!("Window left and top must both be present or absent"),
+            };
+            let size = value(json!({"Width":width,"Height":height}))?;
             let app = edit(pending, docs, "application")?;
-            set_path(
-                app,
-                &["WindowSize"],
-                value(json!({"Width":width,"Height":height}))?,
-            )?;
-            set_path(
-                app,
-                &["WindowPosition"],
-                value(json!({"Left":left,"Top":top}))?,
-            )?;
+            set_path(app, &["WindowSize"], size)?;
+            set_path(app, &["WindowPosition"], position)?;
             return Ok(());
         }
         "osd.enabled" => ("osd", vec!["ShowOsd"], JsonNode::Bool(boolean(v)?)),
@@ -2487,6 +2493,154 @@ mod tests {
         );
         assert!(!change.projection.values.contains_key("Future"));
         assert_eq!(d["application"].root().get("MinimizeOnClose"), None);
+    }
+    #[test]
+    fn window_size_only_forgets_position_and_preserves_size_extensions() {
+        let mut d = docs();
+        d.insert(
+            "application".into(),
+            doc(
+                r#"{"RememberWindowPosition":false,"WindowSize":{"Width":900,"Height":700,"Future":1e9999,"future":-0},"WindowPosition":{"Left":50,"Top":60,"FuturePosition":1.234567890123456789}}"#,
+            ),
+        );
+        let before = d["application"].serialize().unwrap();
+        let change = apply_action(
+            "app.preferences.save",
+            &payload(json!({"app.window":{"width":1024,"height":768}})),
+            &d,
+        )
+        .unwrap();
+        assert_eq!(change.documents.len(), 1);
+        let root = change.documents[0].1.root();
+        assert_eq!(root.get_ci("WindowPosition"), Some(&JsonNode::Null));
+        let size = root.get_ci("WindowSize").unwrap();
+        assert_eq!(size.get_ci("Width").and_then(JsonNode::as_f64), Some(1024.));
+        assert_eq!(size.get_ci("Height").and_then(JsonNode::as_f64), Some(768.));
+        assert_eq!(size.get("Future"), Some(&JsonNode::Number("1e9999".into())));
+        assert_eq!(size.get("future"), Some(&JsonNode::Number("-0".into())));
+        assert_eq!(
+            change.projection.values["app.window"]["position"],
+            Value::Null
+        );
+        assert_eq!(d["application"].serialize().unwrap(), before);
+    }
+    #[test]
+    fn window_position_updates_preserve_nested_extensions() {
+        let mut d = docs();
+        d.insert(
+            "application".into(),
+            doc(
+                r#"{"RememberWindowPosition":true,"WindowSize":{"Width":900,"Height":700,"FutureSize":-0},"WindowPosition":{"Left":50,"Top":60,"FuturePosition":1.234567890123456789}}"#,
+            ),
+        );
+        let change = apply_action(
+            "app.preferences.save",
+            &payload(
+                json!({"app.window":{"width":1000.5,"height":650.25,"left":-1920.5,"top":80.25}}),
+            ),
+            &d,
+        )
+        .unwrap();
+        let root = change.documents[0].1.root();
+        let size = root.get_ci("WindowSize").unwrap();
+        let position = root.get_ci("WindowPosition").unwrap();
+        assert_eq!(
+            size.get_ci("Width").and_then(JsonNode::as_f64),
+            Some(1000.5)
+        );
+        assert_eq!(
+            size.get_ci("Height").and_then(JsonNode::as_f64),
+            Some(650.25)
+        );
+        assert_eq!(
+            position.get_ci("Left").and_then(JsonNode::as_f64),
+            Some(-1920.5)
+        );
+        assert_eq!(
+            position.get_ci("Top").and_then(JsonNode::as_f64),
+            Some(80.25)
+        );
+        assert_eq!(size.get("FutureSize"), Some(&JsonNode::Number("-0".into())));
+        assert_eq!(
+            position.get("FuturePosition"),
+            Some(&JsonNode::Number("1.234567890123456789".into()))
+        );
+        assert_eq!(
+            change.projection.values["app.window"]["position"]["Left"],
+            -1920.5
+        );
+    }
+    #[test]
+    fn window_invalid_payload_leaves_pending_and_documents_unchanged() {
+        let d = docs();
+        let original = d["application"].serialize().unwrap();
+        let mut invalid = vec![
+            json!(null),
+            json!([]),
+            json!({}),
+            json!({"width":900}),
+            json!({"height":700}),
+            json!({"width":900,"height":700,"left":0}),
+            json!({"width":900,"height":700,"top":0}),
+            json!({"width":900,"height":700,"left":null,"top":0}),
+            json!({"width":900,"height":700,"left":0,"top":"0"}),
+            json!({"width":"900","height":700}),
+            json!({"width":900,"height":true}),
+            json!({"width":299.9,"height":700}),
+            json!({"width":8192.1,"height":700}),
+            json!({"width":900,"height":299.9}),
+            json!({"width":900,"height":8192.1}),
+            json!({"width":900,"height":700,"left":-100000.1,"top":0}),
+            json!({"width":900,"height":700,"left":0,"top":100000.1}),
+        ]
+        .into_iter()
+        .map(payload)
+        .collect::<Vec<_>>();
+        invalid.push(JsonNode::parse(r#"{"width":1e9999,"height":700}"#).unwrap());
+        invalid
+            .push(JsonNode::parse(r#"{"width":900,"height":700,"left":0,"top":-1e9999}"#).unwrap());
+        for field in ["width", "height", "left", "top"] {
+            let mut candidate = payload(json!({"width":900,"height":700,"left":0,"top":0}));
+            candidate
+                .set(field, JsonNode::Number("NaN".into()))
+                .unwrap();
+            invalid.push(candidate);
+        }
+        for candidate in invalid {
+            let mut pending = BTreeMap::from([
+                ("application".into(), d["application"].root().clone()),
+                ("osd".into(), payload(json!({"Future":"pending"}))),
+            ]);
+            let before = pending.clone();
+            assert!(
+                preference(&mut pending, &d, "app.window", &candidate).is_err(),
+                "{candidate:?}"
+            );
+            assert_eq!(
+                pending, before,
+                "Rejected window edit changed pending state"
+            );
+            let envelope = JsonNode::Object(vec![("app.window".into(), candidate)]);
+            assert!(apply_action("app.preferences.save", &envelope, &d).is_err());
+        }
+        assert_eq!(d["application"].serialize().unwrap(), original);
+    }
+    #[test]
+    fn window_numeric_bounds_accept_both_save_shapes() {
+        let d = docs();
+        for window in [
+            json!({"width":300,"height":8192}),
+            json!({"width":8192,"height":300,"left":-100000,"top":100000}),
+        ] {
+            assert!(
+                apply_action(
+                    "app.preferences.save",
+                    &payload(json!({"app.window":window})),
+                    &d
+                )
+                .is_ok()
+            );
+        }
     }
     #[test]
     fn generic_aliases_cannot_enable_or_disable_an_actual_controller() {
