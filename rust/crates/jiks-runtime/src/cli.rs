@@ -439,6 +439,13 @@ mod tests {
 }
 // Only a live endpoint can execute commands. The client never initializes hardware.
 pub fn request(root: &Path, request: Request) -> Result<Response> {
+    request_after_write(root, request, || {})
+}
+fn request_after_write(
+    root: &Path,
+    request: Request,
+    after_write: impl FnOnce(),
+) -> Result<Response> {
     let mut bytes = serde_json::to_vec(&request)?;
     ensure!(bytes.len() < LIMIT, "CLI请求过大");
     bytes.push(b'\n');
@@ -475,6 +482,7 @@ pub fn request(root: &Path, request: Request) -> Result<Response> {
         );
     }
     pipe.write_all(&bytes)?;
+    after_write();
     let mut result = vec![];
     loop {
         let mut buffer = [0u8; 4096];
@@ -512,4 +520,14 @@ pub fn request(root: &Path, request: Request) -> Result<Response> {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+#[cfg(test)]
+pub(crate) fn request_with_write_receipt(
+    root: &Path,
+    request: Request,
+    receipt: std::sync::mpsc::SyncSender<()>,
+) -> Result<Response> {
+    request_after_write(root, request, || {
+        let _ = receipt.send(());
+    })
 }

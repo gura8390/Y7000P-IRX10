@@ -357,7 +357,7 @@ impl KeysHost {
     fn status(&self, engine: &Engine, message: impl Into<String>) {
         engine.value("keys.status", json!(message.into()));
     }
-    fn native_finished(&mut self, engine: &mut Engine) -> Result<()> {
+    fn native_finished(&mut self, engine: &mut Engine, driver_now: u64) -> Result<()> {
         let Some(pending) = self.pending.as_ref() else {
             return Ok(());
         };
@@ -426,6 +426,9 @@ impl KeysHost {
                 self.driver_stop_failed = false;
             }
             NativeKind::DriverRead => {
+                // A slow completed read must not immediately reclaim the only
+                // physical slot before foreground commands can be admitted.
+                self.next_driver = driver_now.saturating_add(50);
                 let rows = engine
                     .cache
                     .get("keys.driver")
@@ -603,6 +606,9 @@ impl KeysHost {
         Ok(())
     }
     pub(super) fn poll(&mut self, engine: &mut Engine) -> Result<()> {
+        self.poll_at(engine, monotonic_ms())
+    }
+    fn poll_at(&mut self, engine: &mut Engine, driver_now: u64) -> Result<()> {
         if engine.read_only {
             self.cancel();
         }
@@ -636,7 +642,7 @@ impl KeysHost {
                 }
             }
         }
-        self.native_finished(engine)?;
+        self.native_finished(engine, driver_now)?;
         for _ in 0..256 {
             let Some(event) = self.source.next() else {
                 break;
@@ -917,11 +923,11 @@ impl KeysHost {
             return self.fn_read(engine, false);
         }
         if self.driver_ready
-            && monotonic_ms() >= self.next_driver
+            && driver_now >= self.next_driver
             && engine.pending.is_none()
-            && !(engine.controller.is_some() && engine.next_control <= monotonic_ms())
+            && !(engine.controller.is_some() && engine.next_control <= driver_now)
         {
-            self.next_driver = monotonic_ms().saturating_add(50);
+            self.next_driver = driver_now.saturating_add(50);
             self.native(engine, NativeKind::DriverRead, "keys.driver.read")?;
         }
         Ok(())
@@ -1025,6 +1031,384 @@ mod tests {
         let mut host = KeysHost::default();
         host.source = Box::new(FakeSource(state.clone()));
         (host, state)
+    }
+    fn driver_host(engine: &mut Engine) -> KeysHost {
+        engine.cache.insert(
+            "software".into(),
+            json!({"products":{"hotkeys":{"status":"disabled"}}}),
+        );
+        let (mut host, source) = host();
+        source.lock().unwrap().active = true;
+        host.options.driver = true;
+        host.options.source.utility = true;
+        host.source_ready = true;
+        host.driver_ready = true;
+        host.driver_possible = true;
+        host.software_attempted = true;
+        host.revision = Some((engine.repository.revision(), true, false));
+        host
+    }
+    #[test]
+    fn completed_driver_read_leaves_a_foreground_slot_even_after_a_slow_read() {
+        let mut f = super::super::lifecycle_tests::Fixture::new();
+        let mut host = driver_host(&mut f.engine);
+        let read = f.answer();
+        host.poll_at(&mut f.engine, 100).unwrap();
+        assert!(matches!(f.log.lock().unwrap()[0], A::ReadDriverKeyEvents));
+        // The read completes after its dispatch-based 50ms timer expired.
+        *read.lock().unwrap() = Some(Ok(json!({"active":true,"raw_keys":[]})));
+        f.engine.poll_write().unwrap();
+        let _next_read = f.answer();
+        host.poll_at(&mut f.engine, 200).unwrap();
+        assert!(
+            f.engine.pending.is_none(),
+            "background read immediately reclaimed the completed slot"
+        );
+        assert_eq!(f.log.lock().unwrap().len(), 1);
+        assert_eq!(host.next_driver, 250);
+        host.poll_at(&mut f.engine, 249).unwrap();
+        assert!(f.engine.pending.is_none());
+        host.poll_at(&mut f.engine, 250).unwrap();
+        assert!(matches!(f.log.lock().unwrap()[1], A::ReadDriverKeyEvents));
+    }
+    fn autorun_command(id: u64) -> Command {
+        Command::Execute {
+            request_id: id,
+            command: "app.preferences.save".into(),
+            payload: json!({"app.autorun":"off"}),
+        }
+    }
+    fn off_status() -> Value {
+        let spec = jiks_platform::autorun::Spec {
+            sid: "S-1-5-21-fixture".into(),
+            executable: r"C:\Fixture\Jiks.exe".into(),
+            data_root: r"C:\Fixture\Data".into(),
+            working_directory: r"C:\Fixture".into(),
+            highest: true,
+        };
+        serde_json::to_value(jiks_platform::autorun::status(None, &spec).unwrap()).unwrap()
+    }
+    #[test]
+    fn gui_queued_and_woken_commands_reap_completion_before_driver_readmission() {
+        for already_received in [false, true] {
+            let mut f = super::super::lifecycle_tests::Fixture::new();
+            f.engine.keys = driver_host(&mut f.engine);
+            let read = f.answer();
+            f.engine
+                .with_keys(|keys, engine| keys.poll_at(engine, 100))
+                .unwrap();
+            *read.lock().unwrap() = Some(Ok(json!({"active":true,"raw_keys":[]})));
+            // The worker returned, but the coordinator has not consumed it yet.
+            let _setter = f.answer();
+            let received = if already_received {
+                Some(autorun_command(510))
+            } else {
+                f.sender.send(autorun_command(510)).unwrap();
+                None
+            };
+            f.engine.poll_foreground(received);
+            f.engine
+                .with_keys(|keys, engine| keys.poll_at(engine, 200))
+                .unwrap();
+            assert_eq!(f.log.lock().unwrap().len(), 2);
+            assert!(matches!(
+                f.engine.pending.as_ref().unwrap().action,
+                A::SetAutorun(_)
+            ));
+            assert!(
+                !f.engine
+                    .state
+                    .lock()
+                    .unwrap()
+                    .results
+                    .iter()
+                    .any(|r| r.request_id == 510)
+            );
+        }
+    }
+    #[test]
+    fn gui_rejection_does_not_replace_an_unfinished_driver_ticket_or_retry_later() {
+        let mut f = super::super::lifecycle_tests::Fixture::new();
+        f.engine.keys = driver_host(&mut f.engine);
+        let read = f.answer();
+        f.engine
+            .with_keys(|keys, engine| keys.poll_at(engine, 100))
+            .unwrap();
+        let original_id = f.engine.pending.as_ref().unwrap().work.id;
+        f.sender.send(autorun_command(511)).unwrap();
+        f.engine.poll_foreground(None);
+        assert_eq!(f.engine.pending.as_ref().unwrap().work.id, original_id);
+        assert_eq!(f.log.lock().unwrap().len(), 1);
+        let state = f.engine.state.lock().unwrap();
+        let rejection = state.results.iter().find(|r| r.request_id == 511).unwrap();
+        assert!(!rejection.ok && rejection.message.contains("上一个物理操作尚未返回"));
+        drop(state);
+        *read.lock().unwrap() = Some(Ok(json!({"active":true,"raw_keys":[]})));
+        f.engine.poll_foreground(None);
+        f.engine
+            .with_keys(|keys, engine| keys.poll_at(engine, 200))
+            .unwrap();
+        assert!(f.engine.pending.is_none());
+        assert_eq!(
+            f.log.lock().unwrap().len(),
+            1,
+            "rejected setter was silently retried"
+        );
+    }
+    fn cli_request_during_idle(completed_read: bool) {
+        let mut f = super::super::lifecycle_tests::Fixture::new();
+        f.engine
+            .repository
+            .save(
+                "integrations",
+                SettingsDocument::parse(r#"{"CLI":true,"HWiNFO":false}"#).unwrap(),
+            )
+            .unwrap();
+        f.engine.keys = driver_host(&mut f.engine);
+        f.engine.poll_foreground(None); // Open only this fixture's private endpoint.
+        let read = f.answer();
+        f.engine
+            .with_keys(|keys, engine| keys.poll_at(engine, 100))
+            .unwrap();
+        if completed_read {
+            *read.lock().unwrap() = Some(Ok(json!({"active":true,"raw_keys":[]})));
+            // Previous iteration reaped completion; the CLI has not arrived yet.
+            f.engine.poll_write().unwrap();
+            f.engine
+                .with_keys(|keys, engine| keys.poll_at(engine, 200))
+                .unwrap();
+        }
+        let setter = f.answer();
+        let root = f.engine.repository.root().to_owned();
+        let (written, ready) = std::sync::mpsc::sync_channel(1);
+        let client = std::thread::spawn(move || {
+            crate::cli::request_with_write_receipt(
+                &root,
+                crate::cli::Request::Execute {
+                    command: "app.preferences.save".into(),
+                    payload: json!({"app.autorun":"off"}),
+                },
+                written,
+            )
+        });
+        // Real pipe bytes arrived while the GUI receiver is empty. No wall-clock
+        // sleep and no GUI wake are needed to arrange this admission boundary.
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            f.engine.receiver.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        f.engine.poll_foreground(None);
+        f.engine
+            .with_keys(|keys, engine| keys.poll_at(engine, 250))
+            .unwrap();
+        if completed_read {
+            assert!(matches!(
+                f.engine.pending.as_ref().unwrap().action,
+                A::SetAutorun(_)
+            ));
+            assert!(
+                !client.is_finished(),
+                "CLI acknowledged an unfinished setter"
+            );
+            *setter.lock().unwrap() = Some(Ok(off_status()));
+        } else {
+            assert!(matches!(
+                f.engine.pending.as_ref().unwrap().action,
+                A::ReadDriverKeyEvents
+            ));
+        }
+        let started = std::time::Instant::now();
+        while !client.is_finished() {
+            f.engine.poll_foreground(None);
+            f.engine
+                .with_automation(|host, engine| host.poll(engine))
+                .unwrap();
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::yield_now();
+        }
+        let result = client.join().unwrap().unwrap();
+        assert_eq!(result.ok, completed_read, "{}", result.message);
+        if !completed_read {
+            assert!(result.message.contains("上一个物理操作尚未返回"));
+            *read.lock().unwrap() = Some(Ok(json!({"active":true,"raw_keys":[]})));
+            f.engine.poll_foreground(None);
+            f.engine
+                .with_keys(|keys, engine| keys.poll_at(engine, 300))
+                .unwrap();
+            assert_eq!(
+                f.log.lock().unwrap().len(),
+                1,
+                "unadmitted CLI request was retried"
+            );
+        }
+    }
+    #[test]
+    fn cli_arrival_during_idle_precedes_a_due_background_driver_read() {
+        cli_request_during_idle(true);
+    }
+    #[test]
+    fn cli_unfinished_ticket_rejection_remains_explicit_and_is_not_retried() {
+        cli_request_during_idle(false);
+    }
+    #[test]
+    fn shutdown_precedes_driver_readmission_and_waits_for_the_original_ticket() {
+        let mut f = super::super::lifecycle_tests::Fixture::new();
+        f.engine.keys = driver_host(&mut f.engine);
+        let read = f.answer();
+        f.engine
+            .with_keys(|keys, engine| keys.poll_at(engine, 100))
+            .unwrap();
+        let original = f.engine.pending.as_ref().unwrap().work.id;
+        f.sender
+            .send(Command::Shutdown { request_id: 512 })
+            .unwrap();
+        f.engine.poll_foreground(None);
+        f.engine
+            .with_keys(|keys, engine| keys.poll_at(engine, 200))
+            .unwrap();
+        assert_eq!(f.engine.shutdown, Some(512));
+        assert_eq!(f.engine.pending.as_ref().unwrap().work.id, original);
+        assert!(
+            f.engine
+                .pending
+                .as_ref()
+                .unwrap()
+                .cancel
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert_eq!(f.log.lock().unwrap().len(), 1);
+        *read.lock().unwrap() = Some(Ok(json!({"active":true,"raw_keys":[]})));
+        let _stop = f.answer();
+        f.engine.poll_foreground(None);
+        f.engine
+            .with_keys(|keys, engine| keys.poll_at(engine, 300))
+            .unwrap();
+        assert!(matches!(
+            f.log.lock().unwrap().last(),
+            Some(A::StopDriverKeyEvents)
+        ));
+        assert_eq!(
+            f.log
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|a| matches!(a, A::ReadDriverKeyEvents))
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn due_thermal_control_precedes_driver_polling_and_a_foreground_setter() {
+        let mut f = super::super::lifecycle_tests::Fixture::new();
+        f.engine.keys = driver_host(&mut f.engine);
+        let prepared = super::super::lifecycle_tests::prepared_fixture();
+        let mut baseline = prepared.baseline.clone();
+        baseline.temperature_limit = 88;
+        f.engine.controller = Some(
+            prepared
+                .activate(baseline, Epoch { policy: 1, mode: 1 }, monotonic_ms())
+                .unwrap(),
+        );
+        f.engine.next_control = 0;
+        let _control = f.answer();
+        f.sender.send(autorun_command(513)).unwrap();
+        f.engine.poll_foreground(None);
+        f.engine
+            .with_keys(|keys, engine| keys.poll_at(engine, u64::MAX - 1))
+            .unwrap();
+        assert!(matches!(
+            f.engine.pending.as_ref().unwrap().work.after,
+            After::Control
+        ));
+        assert!(matches!(
+            f.log.lock().unwrap().as_slice(),
+            [A::SetCpuPower { .. }]
+        ));
+        assert!(
+            f.engine
+                .state
+                .lock()
+                .unwrap()
+                .results
+                .iter()
+                .any(|r| r.request_id == 513 && !r.ok)
+        );
+    }
+    #[test]
+    fn explicit_control_stop_is_admitted_before_a_new_due_control_budget() {
+        let mut f = super::super::lifecycle_tests::Fixture::new();
+        let prepared = super::super::lifecycle_tests::prepared_fixture();
+        let mut baseline = prepared.baseline.clone();
+        baseline.temperature_limit = 88;
+        f.engine.controller = Some(
+            prepared
+                .activate(baseline, Epoch { policy: 1, mode: 1 }, monotonic_ms())
+                .unwrap(),
+        );
+        f.engine.cpu_possible = true;
+        f.engine.next_control = 0;
+        let _stop = f.answer();
+        f.sender
+            .send(Command::Execute {
+                request_id: 514,
+                command: "thermal.stop".into(),
+                payload: json!({}),
+            })
+            .unwrap();
+        f.engine.poll_foreground(None);
+        assert!(matches!(f.log.lock().unwrap().as_slice(), [A::StopCpu]));
+        assert!(
+            f.engine.cpu_possible && f.engine.controller.is_some(),
+            "stop was acknowledged before physical completion"
+        );
+        assert!(
+            !f.engine
+                .state
+                .lock()
+                .unwrap()
+                .results
+                .iter()
+                .any(|r| r.request_id == 514)
+        );
+    }
+    #[test]
+    fn completed_driver_event_remains_queued_while_foreground_owns_the_writer() {
+        let mut f = super::super::lifecycle_tests::Fixture::new();
+        f.engine.keys = driver_host(&mut f.engine);
+        let read = f.answer();
+        f.engine
+            .with_keys(|keys, engine| keys.poll_at(engine, 100))
+            .unwrap();
+        // Low bit is the existing built-in driver Fn+Q event.
+        *read.lock().unwrap() = Some(Ok(json!({"active":true,"raw_keys":[1]})));
+        let setter = f.answer();
+        f.engine.poll_foreground(Some(autorun_command(515)));
+        f.engine
+            .with_keys(|keys, engine| keys.poll_at(engine, 200))
+            .unwrap();
+        assert_eq!(f.engine.cache["keys.driver"]["raw_keys"], json!([1]));
+        assert!(
+            f.engine.keys.builtin.is_busy(),
+            "completed event was dropped during foreground admission"
+        );
+        f.engine
+            .with_keys(|keys, engine| keys.poll_at(engine, 201))
+            .unwrap();
+        assert!(f.engine.keys.builtin.is_busy());
+        assert!(matches!(
+            f.engine.pending.as_ref().unwrap().action,
+            A::SetAutorun(_)
+        ));
+        *setter.lock().unwrap() = Some(Ok(off_status()));
+        f.engine.poll_foreground(None);
+        f.engine
+            .with_keys(|keys, engine| keys.poll_at(engine, 202))
+            .unwrap();
+        assert!(
+            f.engine.read_requests.contains_key("power_modes"),
+            "queued Fn event did not resume after foreground completion"
+        );
     }
     #[test]
     fn fn_binding_file_waits_for_actual_source_started_and_configuration_ack() {

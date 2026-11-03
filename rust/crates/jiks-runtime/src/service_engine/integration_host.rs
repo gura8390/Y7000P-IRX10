@@ -210,6 +210,31 @@ impl IntegrationHost {
     }
 }
 impl Engine {
+    /// Coordinator-owned physical ticket only, not telemetry/auxiliary readers.
+    /// Fixed labels deliberately exclude the command payload and configuration.
+    fn physical_status_at(&self, now: u64) -> Value {
+        match &self.pending {
+            Some(pending) => json!({
+                "busy": true,
+                "operation": match &pending.action {
+                    A::ReadDriverKeyEvents => "keys.driver.read",
+                    A::StartDriverKeyEvents => "keys.driver.start",
+                    A::StopDriverKeyEvents => "keys.driver.stop",
+                    A::SetAutorun(_) => "app.autorun.apply",
+                    A::ShutdownWorker => "backend.shutdown",
+                    _ => "device-operation",
+                },
+                "request_id": pending.work.id,
+                "elapsed_ms": now.saturating_sub(pending.started),
+                "deadline_remaining_ms": pending.work.deadline_tick_ms.saturating_sub(now),
+                "late": pending.work.late,
+                "cancel_requested": pending.cancel.load(std::sync::atomic::Ordering::Acquire),
+            }),
+            None => json!({"busy":false,"operation":null,"request_id":null,
+                "elapsed_ms":null,"deadline_remaining_ms":null,"late":false,
+                "cancel_requested":false}),
+        }
+    }
     pub(super) fn request_integration(&mut self, id: u64, payload: &Value) -> Result<()> {
         self.writable()?;
         let mut root = self.repository.document("integrations")?.root().clone();
@@ -307,7 +332,7 @@ impl Engine {
                     match request {
                         Request::Status => {
                             let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-                            endpoint.respond(Response{ok:true,message:"已运行协调器的当前状态".into(),value:json!({"version":state.version,"machine":state.machine,"backend_ready":state.backend_ready,"thermal_active":state.values.get("thermal.active"),"metrics":state.metrics,"notice":state.notice})})?;
+                            endpoint.respond(Response{ok:true,message:"已运行协调器的当前状态".into(),value:json!({"version":state.version,"machine":state.machine,"backend_ready":state.backend_ready,"thermal_active":state.values.get("thermal.active"),"metrics":state.metrics,"notice":state.notice,"physical":self.physical_status_at(monotonic_ms())})})?;
                         }
                         Request::Execute { command, payload } => {
                             if !cli
@@ -327,7 +352,7 @@ impl Engine {
                             } else {
                                 let id = self.new_internal_request()?;
                                 host.request = Some(id);
-                                if let Err(error) = self.process(Command::Execute {
+                                if let Err(error) = self.process_foreground(Command::Execute {
                                     request_id: id,
                                     command,
                                     payload,
@@ -388,5 +413,33 @@ impl Engine {
         })();
         self.integration = host;
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn physical_status_reports_owned_ticket_age_and_lateness_without_payloads() {
+        let mut f = super::super::lifecycle_tests::Fixture::new();
+        assert_eq!(f.engine.physical_status_at(100)["busy"], false);
+        assert!(f.engine.physical_status_at(100)["operation"].is_null());
+        let _answer = f.answer();
+        f.engine.start_work(515,"private payload must never be disclosed",vec![A::ReadDriverKeyEvents],After::Hardware).unwrap();
+        let pending = f.engine.pending.as_mut().unwrap();
+        pending.started = 100;
+        pending.work.deadline_tick_ms = 200;
+        pending.work.late = true;
+        pending.cancel.store(true,std::sync::atomic::Ordering::Release);
+        let actual = f.engine.physical_status_at(250);
+        assert_eq!(actual["busy"],true);
+        assert_eq!(actual["operation"],"keys.driver.read");
+        assert_eq!(actual["request_id"],515);
+        assert_eq!(actual["elapsed_ms"],150);
+        assert_eq!(actual["deadline_remaining_ms"],0);
+        assert_eq!(actual["late"],true);
+        assert_eq!(actual["cancel_requested"],true);
+        assert!(!actual.to_string().contains("private payload"));
+        assert!(f.engine.pending.is_some(),"status cleared or consumed the ticket");
     }
 }

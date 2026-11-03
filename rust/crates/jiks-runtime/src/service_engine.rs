@@ -23,7 +23,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        mpsc::{Receiver, RecvTimeoutError},
+        mpsc::{Receiver, RecvTimeoutError, TryRecvError},
     },
     time::Duration,
 };
@@ -1317,17 +1317,17 @@ impl Engine {
             }
             self.enqueue_read("temperature".into(), A::ReadCpuTemperature, false);
         }
-        if let Some(interval) = sensor_interval
-            .filter(|_| app.hardware_sensors_enabled && !self.read_only)
+        if let Some(interval) =
+            sensor_interval.filter(|_| app.hardware_sensors_enabled && !self.read_only)
         {
             // A newly visible/faster consumer cannot inherit a previous slow
             // dashboard deadline. Keep an already earlier deadline unchanged.
             self.next_metrics = self.next_metrics.min(now.saturating_add(interval));
             self.next_presentation = self.next_presentation.min(now.saturating_add(interval));
         }
-        if let Some(interval) = sensor_interval.filter(|_| {
-            app.hardware_sensors_enabled && !self.read_only && now >= self.next_metrics
-        }) {
+        if let Some(interval) = sensor_interval
+            .filter(|_| app.hardware_sensors_enabled && !self.read_only && now >= self.next_metrics)
+        {
             self.gpu_sampling_requested = true;
             self.next_metrics = now.saturating_add(interval);
             if !self.read_queue.iter().any(|v| v.0 == "telemetry") {
@@ -1400,6 +1400,29 @@ impl Engine {
                 self.enqueue_read("firmware".into(), A::ReadFirmwareSensors, false);
             }
         }
+        self.poll_control(now, &app)?;
+        self.value(
+            "osd.visible",
+            json!(
+                app.hardware_sensors_enabled
+                    && self
+                        .repository
+                        .value("osd")?
+                        .get("ShowOsd")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+            ),
+        );
+        Ok(())
+    }
+    fn poll_control(&mut self, now: u64, app: &ApplicationThermalSettings) -> Result<()> {
+        if self.shutdown.is_some()
+            || self.initializing
+            || self.faulted
+            || self.maintenance.as_ref().is_some_and(|job| job.restoring)
+        {
+            return Ok(());
+        }
         if self.pending.is_none() && now >= self.next_control {
             let freshness = self
                 .last_temperature
@@ -1440,18 +1463,6 @@ impl Engine {
                 );
             }
         }
-        self.value(
-            "osd.visible",
-            json!(
-                app.hardware_sensors_enabled
-                    && self
-                        .repository
-                        .value("osd")?
-                        .get("ShowOsd")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-            ),
-        );
         Ok(())
     }
     fn request_thermal(&mut self, id: u64, payload: &Value) -> Result<()> {
@@ -2168,74 +2179,123 @@ impl Engine {
         Ok(true)
     }
     fn wait_duration(&self, now: u64) -> Result<Duration> {
-        Ok(if self.pending.is_some()
-            || self.maintenance.is_some()
-            || self.reader_close.is_some()
-            || self.shutdown.is_some()
-            || self.automation.is_busy()
-            || self.packages.is_busy()
-            || self.script.is_busy()
-            || self.integration.is_busy()
-            || self.aux.polling()
-            || self.fps.is_busy() && !self.fps.is_active()
-            || self.ui_effects.is_busy()
-            || self.spectrum_file.is_some()
-            || self.startup_job.is_some()
-            || self.reading.is_some()
-            || self.player.is_active()
-            || self.recorder.is_active()
-            || self.record_preparation.is_some()
+        Ok(
+            if self.pending.is_some()
+                || self.maintenance.is_some()
+                || self.reader_close.is_some()
+                || self.shutdown.is_some()
+                || self.automation.is_busy()
+                || self.packages.is_busy()
+                || self.script.is_busy()
+                || self.integration.is_busy()
+                || self.aux.polling()
+                || self.fps.is_busy() && !self.fps.is_active()
+                || self.ui_effects.is_busy()
+                || self.spectrum_file.is_some()
+                || self.startup_job.is_some()
+                || self.reading.is_some()
+                || self.player.is_active()
+                || self.recorder.is_active()
+                || self.record_preparation.is_some()
+            {
+                Duration::from_millis(25)
+            } else if !self.read_queue.is_empty() {
+                Duration::ZERO
+            } else if self.automation.is_source_active()
+                || self.integration.is_active()
+                || self.keys.is_active()
+                || self.fps.is_active()
+            {
+                Duration::from_millis(50)
+            } else {
+                let app = ApplicationThermalSettings::from_document(
+                    self.repository.document("application")?,
+                )?;
+                let mut next = None;
+                if self.controller.is_some() || self.shadow.is_some() {
+                    next = Some(self.next_temperature.min(self.next_control));
+                }
+                if app.hardware_sensors_enabled && !self.read_only && self.sensor_consumers()? {
+                    next = Some(next.map_or(self.next_metrics, |n: u64| n.min(self.next_metrics)));
+                }
+                let gpu_visible = {
+                    let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                    state.values.get("ui.main_visible").and_then(Value::as_bool) == Some(true)
+                        && state.values.get("ui.page").and_then(Value::as_str) == Some("dashboard")
+                };
+                if self.gpu_process_monitoring && !self.read_only && gpu_visible {
+                    next = Some(next.map_or(self.next_gpu_metadata, |n: u64| {
+                        n.min(self.next_gpu_metadata)
+                    }));
+                }
+                let wait = next
+                    .map(|deadline| {
+                        Duration::from_millis(deadline.saturating_sub(now).clamp(1, 250))
+                    })
+                    .unwrap_or(Duration::from_secs(30));
+                self.aux.next_deadline().map_or(wait, |deadline| {
+                    // Preserve the existing fast-source caps, but an otherwise idle
+                    // 2s battery metadata consumer needs neither a 30s stall nor a
+                    // permanent 25/250ms polling loop just because its port is alive.
+                    wait.min(Duration::from_millis(deadline.saturating_sub(now).max(1)))
+                })
+            },
+        )
+    }
+    /// Reap actual completion before admission. GUI and CLI requests get the
+    /// available slot before periodic Fn reads; an unfinished ticket stays owned.
+    fn poll_foreground(&mut self, received: Option<Command>) {
+        if let Err(error) = self.poll_write() {
+            self.contain_fault(0, error);
+        }
+        // Consume already-returned sensor readings before evaluating a due
+        // thermal budget. Completion does not replace the original sample time.
+        if let Err(error) = self.poll_read() {
+            self.contain_fault(0, error);
+        }
+        let command = received.or_else(|| match self.receiver.try_recv() {
+            Ok(command) => Some(command),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(Command::Shutdown { request_id: 0 }),
+        });
+        if let Some(command) = command {
+            let id = command.request_id();
+            if let Err(error) = self.process_foreground(command) {
+                self.finish(id, false, format!("{error:#}"));
+            }
+        }
+        if let Err(error) = self.poll_integration() {
+            self.value("integration.error", json!(format!("集成未完成：{error:#}")));
+        }
+        self.poll_foreground_control();
+    }
+    fn poll_foreground_control(&mut self) {
+        // Preserve the controller's due priority over ordinary foreground
+        // writers and background reads. Shutdown/stop are admitted first.
+        if self.controller.is_some() && monotonic_ms() >= self.next_control {
+            let result = (|| -> Result<()> {
+                let app = ApplicationThermalSettings::from_document(
+                    self.repository.document("application")?,
+                )?;
+                self.poll_control(monotonic_ms(), &app)
+            })();
+            if let Err(error) = result {
+                self.contain_fault(0, error);
+            }
+        }
+    }
+    fn process_foreground(&mut self, command: Command) -> Result<()> {
+        if !matches!(&command, Command::Shutdown { .. })
+            && !matches!(&command, Command::Execute { command, .. } if command == "thermal.stop")
         {
-            Duration::from_millis(25)
-        } else if !self.read_queue.is_empty() {
-            Duration::ZERO
-        } else if self.automation.is_source_active()
-            || self.integration.is_active()
-            || self.keys.is_active()
-            || self.fps.is_active()
-        {
-            Duration::from_millis(50)
-        } else {
-            let app = ApplicationThermalSettings::from_document(
-                self.repository.document("application")?,
-            )?;
-            let mut next = None;
-            if self.controller.is_some() || self.shadow.is_some() {
-                next = Some(self.next_temperature.min(self.next_control));
-            }
-            if app.hardware_sensors_enabled && !self.read_only && self.sensor_consumers()? {
-                next = Some(next.map_or(self.next_metrics, |n: u64| n.min(self.next_metrics)));
-            }
-            let gpu_visible = {
-                let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-                state.values.get("ui.main_visible").and_then(Value::as_bool) == Some(true)
-                    && state.values.get("ui.page").and_then(Value::as_str) == Some("dashboard")
-            };
-            if self.gpu_process_monitoring && !self.read_only && gpu_visible {
-                next = Some(next.map_or(self.next_gpu_metadata, |n: u64| {
-                    n.min(self.next_gpu_metadata)
-                }));
-            }
-            let wait = next.map(|deadline| {
-                Duration::from_millis(deadline.saturating_sub(now).clamp(1, 250))
-            })
-            .unwrap_or(Duration::from_secs(30));
-            self.aux.next_deadline().map_or(wait, |deadline| {
-                // Preserve the existing fast-source caps, but an otherwise idle
-                // 2s battery metadata consumer needs neither a 30s stall nor a
-                // permanent 25/250ms polling loop just because its port is alive.
-                wait.min(Duration::from_millis(deadline.saturating_sub(now).max(1)))
-            })
-        })
+            self.poll_foreground_control();
+        }
+        self.process(command)
     }
     pub(crate) fn run(&mut self) -> Result<()> {
+        let mut received = None;
         loop {
-            if let Err(error) = self.poll_write() {
-                self.contain_fault(0, error);
-            }
-            if let Err(error) = self.poll_read() {
-                self.contain_fault(0, error);
-            }
+            self.poll_foreground(received.take());
             if let Err(error) = self.poll_macros() {
                 self.contain_fault(0, error);
             }
@@ -2267,9 +2327,6 @@ impl Engine {
             if let Err(error) = self.with_fps(|fps, engine| fps.poll(engine)) {
                 self.contain_fault(0, error);
             }
-            if let Err(error) = self.poll_integration() {
-                self.value("integration.error", json!(format!("集成未完成：{error:#}")));
-            }
             match self.poll_shutdown() {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
@@ -2283,16 +2340,11 @@ impl Engine {
             }
             let wait = self.wait_duration(monotonic_ms())?;
             match self.receiver.recv_timeout(wait) {
-                Ok(command) => {
-                    let id = command.request_id();
-                    if let Err(e) = self.process(command) {
-                        self.finish(id, false, format!("{e:#}"));
-                    }
-                }
+                Ok(command) => received = Some(command),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     if self.shutdown.is_none() {
-                        self.process(Command::Shutdown { request_id: 0 })?;
+                        received = Some(Command::Shutdown { request_id: 0 });
                     }
                 }
             }
@@ -2378,6 +2430,7 @@ mod lifecycle_tests {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     pub(super) struct Fixture {
         pub(super) engine: Engine,
+        pub(super) sender: std::sync::mpsc::SyncSender<Command>,
         root: PathBuf,
         pub(super) log: Arc<Mutex<Vec<A>>>,
         pub(super) answers: Arc<Mutex<VecDeque<Answer>>>,
@@ -2397,7 +2450,7 @@ mod lifecycle_tests {
                 )
                 .unwrap();
             let state = Arc::new(Mutex::new(Snapshot::default()));
-            let (_send, receiver) = std::sync::mpsc::sync_channel(16);
+            let (sender, receiver) = std::sync::mpsc::sync_channel(16);
             let log = Arc::new(Mutex::new(vec![]));
             let answers = Arc::new(Mutex::new(VecDeque::new()));
             let port = || {
@@ -2470,6 +2523,7 @@ mod lifecycle_tests {
             };
             Self {
                 engine,
+                sender,
                 root,
                 log,
                 answers,
@@ -2655,12 +2709,108 @@ mod lifecycle_tests {
         assert_eq!(f.engine.read_queue.len(), 64);
         assert!(f.log.lock().unwrap().is_empty());
     }
-    fn prepared_fixture() -> Prepared {
+    pub(super) fn prepared_fixture() -> Prepared {
         let settings = ApplicationThermalSettings::from_document(
             &SettingsDocument::parse("{\"EnableCpuThermalControl\":true}").unwrap(),
         )
         .unwrap();
         Prepared::from_discovery(settings,&json!({"raw_mode":255,"limits":{"long_watts":70,"short_watts":125,"temperature_limit":100},"ranges":[{"IDs":0x0102ff00u32,"MinValue":50,"MaxValue":135,"Step":1,"DefaultValue":70},{"IDs":0x0101ff00u32,"MinValue":60,"MaxValue":195,"Step":1,"DefaultValue":125},{"IDs":0x0104ff00u32,"MinValue":85,"MaxValue":100,"Step":1,"DefaultValue":100}]})).unwrap()
+    }
+    fn intel_temperature(celsius: f64, requested: u64, completed: u64) -> Value {
+        json!({"requested_at_tick_ms":requested,"completed_at_tick_ms":completed,
+            "cores":[],"package_temperature_celsius":celsius,
+            "maximum_core_temperature_celsius":celsius,"conservative_temperature_celsius":celsius,
+            "source":"fake DTS","errors":[]})
+    }
+    fn foreground_temperature_case(old_expired: bool, new_temperature: Option<f64>) {
+        let mut f = Fixture::new();
+        let prepared = prepared_fixture();
+        let now = monotonic_ms();
+        let freshness = prepared.settings.options.policy.freshness_ms;
+        assert!(now > freshness + 1);
+        let old_tick = if old_expired {
+            now - freshness - 1
+        } else {
+            now
+        };
+        f.engine.intel_sample =
+            Some(serde_json::from_value(intel_temperature(60.0, old_tick, old_tick)).unwrap());
+        let read = f.answer();
+        f.engine
+            .enqueue_read("intel".into(), A::ReadIntelSensors, false);
+        f.engine.poll_read().unwrap();
+        if let Some(temperature) = new_temperature {
+            *read.lock().unwrap() = Some(Ok(intel_temperature(temperature, now, now)));
+        }
+        let mut baseline = prepared.baseline.clone();
+        baseline.temperature_limit = 88;
+        f.engine.controller = Some(
+            prepared
+                .activate(baseline, Epoch { policy: 1, mode: 1 }, now)
+                .unwrap(),
+        );
+        f.engine.next_control = 0;
+        let _control = f.answer();
+        // This is the production admission helper, including the zero-wait
+        // reader reap and due thermal evaluation in their actual order.
+        f.engine.poll_foreground(None);
+        let status = f.engine.state.lock().unwrap().values["thermal.status"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        match new_temperature {
+            Some(temperature) => {
+                assert!(!status.contains("SensorFault"), "{status}");
+                assert_eq!(
+                    f.engine.intel_sample.as_ref().unwrap().requested_at_tick_ms,
+                    now
+                );
+                assert_eq!(
+                    f.engine
+                        .intel_sample
+                        .as_ref()
+                        .unwrap()
+                        .maximum_core_temperature_celsius,
+                    Some(temperature)
+                );
+                if temperature >= 90.0 {
+                    assert!(matches!(f.engine.pending.as_ref().map(|p| &p.action),
+                        Some(A::SetCpuPower { power, .. }) if power.long_watts < 70));
+                } else {
+                    assert!(
+                        !matches!(f.engine.pending.as_ref().map(|p| &p.action),
+                        Some(A::SetCpuPower { power, .. }) if power.long_watts < 70),
+                        "fresh cool sample incorrectly inherited the expired-cache minimum budget"
+                    );
+                }
+                assert!(f.engine.reading.is_none());
+            }
+            None => {
+                assert!(status.contains("SensorFault"), "{status}");
+                assert_eq!(
+                    f.engine.intel_sample.as_ref().unwrap().requested_at_tick_ms,
+                    old_tick
+                );
+                assert!(
+                    f.engine.reading.is_some(),
+                    "uncompleted reader was treated as a fresh sample"
+                );
+                assert!(matches!(f.engine.pending.as_ref().map(|p| &p.action),
+                    Some(A::SetCpuPower { power, .. }) if power.long_watts == 50));
+            }
+        }
+    }
+    #[test]
+    fn foreground_reaps_completed_fresh_temperature_before_expired_cache_evaluation() {
+        foreground_temperature_case(true, Some(60.0));
+    }
+    #[test]
+    fn foreground_uses_completed_hotter_sample_instead_of_still_fresh_cool_cache() {
+        foreground_temperature_case(false, Some(95.0));
+    }
+    #[test]
+    fn foreground_uncompleted_temperature_reader_cannot_refresh_expired_cache() {
+        foreground_temperature_case(true, None);
     }
     #[test]
     fn actual_enable_completion_with_commit_failure_keeps_stop_available() {
