@@ -26,9 +26,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use windows_sys::Win32::Graphics::Dwm::{
-    DWMWA_BORDER_COLOR, DWMWA_CAPTION_BUTTON_BOUNDS, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
-    DWMWA_USE_IMMERSIVE_DARK_MODE, DwmDefWindowProc, DwmExtendFrameIntoClientArea,
-    DwmGetWindowAttribute, DwmSetWindowAttribute,
+    DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute,
 };
 
 // Stable Windows SDK constants omitted/gated in windows-sys metadata.
@@ -170,6 +169,7 @@ pub(super) unsafe fn apply_window_chrome(hwnd: HWND) {
 }
 const WM_TRAY: u32 = WM_APP + 31;
 const WM_RELAYOUT: u32 = WM_APP + 32;
+const WM_FINISH_DASHBOARD_COMBO: u32 = WM_APP + 33;
 const TIMER: usize = 1;
 const TRAY_HOVER_TIMER: usize = 2;
 const TRAY_HOVER_DELAY: Duration = Duration::from_millis(500);
@@ -182,8 +182,6 @@ const ID_TRAY_OPEN: usize = 300;
 const ID_TRAY_EXIT: usize = 301;
 const ID_TRAY_STATUS: usize = 302;
 const ID_QUICK: usize = 6000;
-const CAPTION_HEIGHT: i32 = 32;
-const CAPTION_PROPERTY: windows_sys::core::PCWSTR = windows_sys::w!("Jiks.MainCaption");
 const MAIN_TOOLBAR: [(u16, &str); 2] = [(ID_DEVICE, "device.details"), (ID_THEME, "app.preferences.save")];
 
 fn main_nav() -> impl Iterator<Item = (usize, Page)> {
@@ -202,77 +200,6 @@ fn device_badge(model: &UiModel) -> String {
     if name.starts_with("Y7000P") { format!("Legion {name}") } else { name.to_owned() }
 }
 
-unsafe fn extend_main_caption(hwnd: HWND, dpi: u32) -> bool {
-    unsafe {
-        let margins = MARGINS {
-            cxLeftWidth: 0,
-            cxRightWidth: 0,
-            cyTopHeight: CAPTION_HEIGHT * dpi as i32 / 96,
-            cyBottomHeight: 0,
-        };
-        DwmExtendFrameIntoClientArea(hwnd, &margins) >= 0
-    }
-}
-
-unsafe fn caption_reserved_width(hwnd: HWND, dpi: u32) -> i32 {
-    unsafe {
-        let mut buttons: RECT = zeroed();
-        if DwmGetWindowAttribute(
-            hwnd, DWMWA_CAPTION_BUTTON_BOUNDS as u32, (&mut buttons as *mut RECT).cast(),
-            size_of::<RECT>() as u32,
-        ) >= 0 && buttons.right > buttons.left {
-            ((buttons.right - buttons.left) * 96 + dpi as i32 - 1) / dpi as i32 + 6
-        } else {
-            150
-        }
-    }
-}
-
-/// Extend only the caption into the client. DefWindowProc keeps the original
-/// sizing borders and scroll bar, and DWM owns the native caption buttons.
-unsafe fn main_caption_message(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> Option<isize> {
-    unsafe {
-        if GetPropW(hwnd, CAPTION_PROPERTY).is_null() {
-            return None;
-        }
-        if msg == WM_NCCALCSIZE && lp != 0 {
-            DefWindowProcW(hwnd, msg, wp, lp);
-            // RECT and NCCALCSIZE_PARAMS both start with the proposed client RECT.
-            let client = &mut *(lp as *mut RECT);
-            let height = GetSystemMetricsForDpi(SM_CYCAPTION, GetDpiForWindow(hwnd).max(96));
-            client.top -= height;
-            return Some(0);
-        }
-        if matches!(msg, WM_NCHITTEST | WM_NCMOUSEMOVE | WM_NCMOUSELEAVE
-            | WM_NCLBUTTONDOWN | WM_NCLBUTTONUP | WM_NCLBUTTONDBLCLK
-            | WM_NCPAINT | WM_NCACTIVATE) {
-            let mut result = 0;
-            if DwmDefWindowProc(hwnd, msg, wp, lp, &mut result) != 0 {
-                return Some(result);
-            }
-        }
-        if msg == WM_NCHITTEST {
-            let result = DefWindowProcW(hwnd, msg, wp, lp);
-            if result != HTCLIENT as isize {
-                return Some(result);
-            }
-            let mut point = POINT { x: lp as i16 as i32, y: (lp >> 16) as i16 as i32 };
-            if ScreenToClient(hwnd, &mut point) != 0
-                && (0..CAPTION_HEIGHT * GetDpiForWindow(hwnd).max(96) as i32 / 96).contains(&point.y)
-            {
-                let child = ChildWindowFromPointEx(hwnd, point, CWP_SKIPINVISIBLE);
-                if !matches!(GetDlgCtrlID(child) as u16, ID_DEVICE | ID_THEME) {
-                    return Some(HTCAPTION as isize);
-                }
-            }
-            return Some(result);
-        }
-        if msg == WM_NCDESTROY {
-            RemovePropW(hwnd, CAPTION_PROPERTY);
-        }
-        None
-    }
-}
 const METRIC_METER: usize = 0x4A494D54;
 const TOOL_KEYS: [&str; 8] = [
     "behavior",
@@ -342,6 +269,45 @@ fn dashboard_direct_command(key: &str) -> Option<&'static str> {
         "gpu.hybrid_mode" => Some("gpu.hybrid.apply"),
         "gpu.oc.enabled" => Some("gpu.oc.apply"),
         _ => None,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DashboardComboAction {
+    Ignore,
+    Apply,
+    Finish,
+}
+
+#[derive(Default)]
+struct DashboardCombo {
+    open: Option<(u16, bool)>,
+}
+impl DashboardCombo {
+    fn notify(&mut self, id: u16, notification: u16, native_open: bool) -> DashboardComboAction {
+        match u32::from(notification) {
+            CBN_DROPDOWN => self.open = Some((id, false)),
+            CBN_SELENDOK | CBN_SELENDCANCEL => {
+                if let Some((open_id, accepted)) = &mut self.open
+                    && *open_id == id
+                {
+                    *accepted = u32::from(notification) == CBN_SELENDOK;
+                }
+            }
+            CBN_CLOSEUP if self.open.is_some_and(|(open_id, _)| open_id == id) => {
+                return DashboardComboAction::Finish;
+            }
+            CBN_SELCHANGE if !native_open && self.open.is_none_or(|(open_id, _)| open_id != id) => {
+                return DashboardComboAction::Apply;
+            }
+            _ => {}
+        }
+        DashboardComboAction::Ignore
+    }
+
+    fn finish(&mut self, id: u16) -> bool {
+        self.open.is_some_and(|(open_id, _)| open_id == id)
+            && self.open.take().is_some_and(|(_, accepted)| accepted)
     }
 }
 
@@ -452,6 +418,29 @@ fn field_options(model: &UiModel, field: &catalog::Field) -> Option<Vec<UiChoice
             if field.key == "packages.sort" {
                 for option in &mut options {
                     option.label = super::i18n::tr(&option.label).into_owned();
+                }
+            } else if field.key == "power.mode" {
+                for option in &mut options {
+                    let mode = option.value.as_u64().or_else(|| option.value.as_str()?.parse().ok());
+                    let label = match mode {
+                        Some(1) => "安静模式",
+                        Some(2) => "均衡模式",
+                        Some(3) => "野兽模式",
+                        Some(224) => "超能模式",
+                        Some(255) => "自定义模式",
+                        _ => continue,
+                    };
+                    option.label = super::i18n::tr_static(label).to_owned();
+                }
+            } else if field.key == "power.always_on_usb" {
+                for option in &mut options {
+                    let label = match option.value.as_str() {
+                        Some("Always") => "保持开启",
+                        Some("Sleeping") => "睡眠时供电",
+                        Some("Off") => "关闭",
+                        _ => continue,
+                    };
+                    option.label = super::i18n::tr_static(label).to_owned();
                 }
             }
             Some(options)
@@ -2034,7 +2023,6 @@ struct App {
     body_font: HFONT,
     heading_font: HFONT,
     title_font: HFONT,
-    caption_font: HFONT,
     brush: HBRUSH,
     surface_brush: HBRUSH,
     fixed: Vec<HWND>,
@@ -2051,7 +2039,6 @@ struct App {
     cards: Vec<CardSurface>,
     surface_children: BTreeSet<usize>,
     muted_labels: BTreeSet<usize>,
-    caption: HWND,
     notice: HWND,
     rendered_revision: u64,
     metadata_revision: u64,
@@ -2061,6 +2048,7 @@ struct App {
     content_height: i32,
     pending: BTreeMap<u64, bool>,
     direct_pending: BTreeMap<u64, String>,
+    dashboard_combo: DashboardCombo,
     rendering: bool,
     layout_posted: bool,
     preview_theme: Option<&'static str>,
@@ -2155,7 +2143,6 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
             body_font: null_mut(),
             heading_font: null_mut(),
             title_font: null_mut(),
-            caption_font: null_mut(),
             brush,
             surface_brush: CreateSolidBrush(surface()),
             fixed: vec![],
@@ -2172,7 +2159,6 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
             cards: vec![],
             surface_children: BTreeSet::new(),
             muted_labels: BTreeSet::new(),
-            caption: null_mut(),
             notice: null_mut(),
             rendered_revision: u64::MAX,
             metadata_revision: u64::MAX,
@@ -2182,6 +2168,7 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
             content_height: 0,
             pending: BTreeMap::new(),
             direct_pending: BTreeMap::new(),
+            dashboard_combo: DashboardCombo::default(),
             rendering: false,
             layout_posted: false,
             preview_theme: None,
@@ -2225,12 +2212,6 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
         if hwnd.is_null() {
             drop(Box::from_raw(raw));
             bail!("无法创建拯救者工具箱窗口：{}", GetLastError());
-        }
-        if extend_main_caption(hwnd, GetDpiForWindow(hwnd).max(96))
-            && SetPropW(hwnd, CAPTION_PROPERTY, 1usize as HANDLE) != 0
-        {
-            SetWindowPos(hwnd, null_mut(), 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         }
         a11y::annotate(hwnd, "main", None, None);
         let instance_key = (*raw).borrow().bridge.instance_key.clone();
@@ -2338,9 +2319,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
         let raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut RefCell<App>;
         if raw.is_null() {
             return DefWindowProcW(hwnd, msg, wp, lp);
-        }
-        if let Some(result) = main_caption_message(hwnd, msg, wp, lp) {
-            return result;
         }
         if let Some(result) = presentation_message(msg, wp, lp) {
             return result;
@@ -2560,9 +2538,6 @@ unsafe fn dispatch_window(app: &mut App, msg: u32, wp: usize, lp: isize) -> Opti
             WM_DPICHANGED => {
                 app.capture();
                 app.dpi = (wp & 0xffff) as u32;
-                if !GetPropW(app.hwnd, CAPTION_PROPERTY).is_null() {
-                    extend_main_caption(app.hwnd, app.dpi);
-                }
                 let rect = &*(lp as *const RECT);
                 SetWindowPos(
                     app.hwnd,
@@ -2596,6 +2571,10 @@ unsafe fn dispatch_window(app: &mut App, msg: u32, wp: usize, lp: isize) -> Opti
                 if !app.rendering {
                     app.command((wp & 0xffff) as u16, ((wp >> 16) & 0xffff) as u16);
                 }
+                Some(0)
+            }
+            WM_FINISH_DASHBOARD_COMBO => {
+                app.finish_dashboard_combo(wp as u16, lp as HWND);
                 Some(0)
             }
             WM_VSCROLL if lp == 0 => {
@@ -2757,7 +2736,7 @@ unsafe fn dispatch_window(app: &mut App, msg: u32, wp: usize, lp: isize) -> Opti
 impl Drop for App {
     fn drop(&mut self) {
         unsafe {
-            for font in [self.body_font, self.heading_font, self.title_font, self.caption_font] {
+            for font in [self.body_font, self.heading_font, self.title_font] {
                 if !font.is_null() {
                     DeleteObject(font);
                 }
@@ -2794,7 +2773,7 @@ impl App {
     }
     unsafe fn make_fonts(&mut self) {
         unsafe {
-            for f in [self.body_font, self.heading_font, self.title_font, self.caption_font] {
+            for f in [self.body_font, self.heading_font, self.title_font] {
                 if !f.is_null() {
                     DeleteObject(f);
                 }
@@ -2802,7 +2781,6 @@ impl App {
             self.body_font = font(self.dpi, 14, false);
             self.heading_font = font(self.dpi, 17, true);
             self.title_font = font(self.dpi, 22, true);
-            self.caption_font = font(self.dpi, 12, false);
         }
     }
     unsafe fn build_fixed(&mut self) {
@@ -2872,17 +2850,6 @@ impl App {
                 presentation_flag(h, "Jiks.CaptionTool", true);
                 a11y::annotate(h, name, Some(&super::i18n::tr(label)), None);
             }
-            self.caption = create(
-                self.hwnd,
-                "STATIC",
-                "拯救者工具箱",
-                SS_CENTERIMAGE | SS_ENDELLIPSIS | SS_NOPREFIX,
-                0,
-                [0, 0, 0, 0],
-                self.caption_font,
-            );
-            self.fixed.push(self.caption);
-            a11y::annotate(self.caption, "main.caption", None, None);
             self.notice = create(
                 self.hwnd,
                 "STATIC",
@@ -2945,13 +2912,9 @@ impl App {
                 );
             }
             let right = w - CONTENT_RIGHT;
-            let integrated = !GetPropW(self.hwnd, CAPTION_PROPERTY).is_null();
-            let caption_right = w - if integrated { caption_reserved_width(self.hwnd, self.dpi) } else { 12 };
-            let theme_x = caption_right - 32;
+            let theme_x = w - 12 - 32;
             let device_x = theme_x - 163;
-            ShowWindow(self.caption, if integrated { SW_SHOWNA } else { SW_HIDE });
             for (hwnd, x, y, width, height) in [
-                (self.caption, 12, 0, device_x - 24, CAPTION_HEIGHT),
                 (GetDlgItem(self.hwnd, ID_DEVICE as i32), device_x, 2, 160, 26),
                 (GetDlgItem(self.hwnd, ID_THEME as i32), theme_x, 2, 32, 26),
                 (self.notice, CONTENT_X, h - FOOTER_HEIGHT + 5, right - CONTENT_X, 26),
@@ -3249,6 +3212,7 @@ impl App {
                 DestroyWindow(p.hwnd);
             }
             self.bindings.clear();
+            self.dashboard_combo = DashboardCombo::default();
             self.buttons.clear();
             self.pickers.clear();
             self.metrics.clear();
@@ -3387,8 +3351,8 @@ impl App {
                 y += 160;
             }
             let sections = catalog::sections(self.page, self.tools_tab, &model);
-            self.dashboard_structure =
-                (self.page == Page::Dashboard).then(|| DashboardStructure::new(&model, &sections));
+            self.dashboard_structure = matches!(self.page, Page::Dashboard | Page::Display | Page::Graphics)
+                .then(|| DashboardStructure::new(&model, &sections));
             let mut next_field = 1000u16;
             let mut next_button = 2000u16;
             let two_columns = self.page == Page::Dashboard && width >= 830;
@@ -3482,7 +3446,7 @@ impl App {
                     let row_top = y;
                     let mut row = RowColumns::new(card_x, width + 32, matches!(spec.kind, FieldKind::Toggle));
                     let value = self.drafts.get(spec.key).cloned().unwrap_or_else(|| field_value(&model, spec.key));
-                    let process_selector = self.page == Page::Dashboard && spec.key == GPU_PROCESS_SELECTOR;
+                    let process_selector = spec.key == GPU_PROCESS_SELECTOR;
                     let options = if process_selector {
                         Some(gpu_process_choices(&model))
                     } else {
@@ -3801,17 +3765,26 @@ impl App {
                 .find(|b| GetDlgCtrlID(b.hwnd) == id as i32)
             {
                 if self.page == Page::Dashboard && let Some(command) = dashboard_direct_command(&binding.key) {
-                    let committed = match binding.kind {
-                        BindingKind::Choice(_) => {
-                            notification == CBN_CLOSEUP as u16
-                                || (notification == CBN_SELCHANGE as u16
-                                    && SendMessageW(binding.hwnd, CB_GETDROPPEDSTATE, 0, 0) == 0)
-                        }
-                        BindingKind::Toggle => notification == BN_CLICKED as u16,
-                        _ => false,
+                    let action = match binding.kind {
+                        BindingKind::Choice(_) => self.dashboard_combo.notify(
+                            id, notification, SendMessageW(binding.hwnd, CB_GETDROPPEDSTATE, 0, 0) != 0,
+                        ),
+                        BindingKind::Toggle if notification == BN_CLICKED as u16 => DashboardComboAction::Apply,
+                        _ => DashboardComboAction::Ignore,
                     };
-                    if committed && IsWindowEnabled(binding.hwnd) != 0 {
-                        self.apply_dashboard_control(id, command);
+                    match action {
+                        DashboardComboAction::Apply if IsWindowEnabled(binding.hwnd) != 0 => {
+                            self.apply_dashboard_control(id, command);
+                        }
+                        DashboardComboAction::Finish => {
+                            // CBN_SELCHANGE may follow CBN_CLOSEUP. Keep the
+                            // drop-down transaction active through both, then
+                            // read the final selection and show any confirmation.
+                            if PostMessageW(self.hwnd, WM_FINISH_DASHBOARD_COMBO, id as usize, binding.hwnd as isize) == 0 {
+                                self.dashboard_combo = DashboardCombo::default();
+                            }
+                        }
+                        _ => {}
                     }
                     return;
                 }
@@ -3987,6 +3960,23 @@ impl App {
                 self.brush = CreateSolidBrush(paper());
                 self.surface_brush = CreateSolidBrush(surface());
                 RedrawWindow(self.hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+            }
+        }
+    }
+
+    unsafe fn finish_dashboard_combo(&mut self, id: u16, hwnd: HWND) {
+        unsafe {
+            if self.page != Page::Dashboard || self.rendering {
+                return;
+            }
+            let Some(binding) = self.bindings.iter().find(|binding| {
+                binding.hwnd == hwnd && GetDlgCtrlID(hwnd) == id as i32
+            }) else { return };
+            if self.dashboard_combo.finish(id)
+                && IsWindowEnabled(hwnd) != 0
+                && let Some(command) = dashboard_direct_command(&binding.key)
+            {
+                self.apply_dashboard_control(id, command);
             }
         }
     }
@@ -4369,7 +4359,7 @@ impl App {
                         .fetch_add(changed_readings, Ordering::Relaxed);
                 }
                 for binding in &self.bindings {
-                    if self.page == Page::Dashboard && binding.key == GPU_PROCESS_SELECTOR {
+                    if binding.key == GPU_PROCESS_SELECTOR {
                         continue;
                     }
                     if !matches!(binding.kind, BindingKind::Display { .. }) {
@@ -4406,7 +4396,7 @@ impl App {
         if self.metadata_revision == model.metadata_revision {
             return false;
         }
-        if self.page != Page::Dashboard {
+        if !matches!(self.page, Page::Dashboard | Page::Display | Page::Graphics) {
             return true;
         }
         let full = snapshot(&self.bridge);
@@ -5056,6 +5046,32 @@ unsafe fn copy_wide<const N: usize>(dest: &mut [u16; N], source: &str) {
 #[cfg(test)]
 mod presentation_regression_tests {
     use super::*;
+    #[test]
+    fn dashboard_combo_applies_committed_drop_down_and_closed_arrow_only() {
+        use DashboardComboAction::*;
+        let mut combo = DashboardCombo::default();
+        let id = 1000;
+        // Browse and cancel: ignore highlights and either order of SELCHANGE
+        // and CLOSEUP while the native notifications are being dispatched.
+        assert!(combo.notify(id, CBN_DROPDOWN as u16, true) == Ignore);
+        assert!(combo.notify(id, CBN_SELCHANGE as u16, true) == Ignore);
+        assert!(combo.notify(id, CBN_SELENDCANCEL as u16, false) == Ignore);
+        assert!(combo.notify(id, CBN_CLOSEUP as u16, false) == Finish);
+        assert!(combo.notify(id, CBN_SELCHANGE as u16, false) == Ignore);
+        assert!(!combo.finish(id));
+        assert!(combo.notify(id, CBN_CLOSEUP as u16, false) == Ignore);
+
+        // Native accept precedes the deferred readback of the selected item.
+        assert!(combo.notify(id, CBN_DROPDOWN as u16, true) == Ignore);
+        assert!(combo.notify(id, CBN_SELENDOK as u16, true) == Ignore);
+        assert!(combo.notify(id, CBN_CLOSEUP as u16, false) == Finish);
+        assert!(combo.notify(id, CBN_SELCHANGE as u16, false) == Ignore);
+        assert!(combo.finish(id));
+        assert!(!combo.finish(id));
+
+        // Arrow keys can change an unopened native combo's selected item.
+        assert!(combo.notify(id, CBN_SELCHANGE as u16, false) == Apply);
+    }
     #[test]
     fn dashboard_structure_ignores_live_values_and_unrelated_metadata() {
         let mut model = UiModel::default();

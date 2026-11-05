@@ -519,7 +519,7 @@ pub fn sections(page: Page, tools_tab: usize, model: &UiModel) -> Vec<Section> {
                     field("battery.mode", "充电模式", Choice(vec![]), "battery.apply"),
                     field(
                         "battery.night_charge",
-                        "夜间充电优化",
+                        "隔夜电池充电",
                         Toggle,
                         "battery.night_charge",
                     ),
@@ -565,8 +565,8 @@ pub fn sections(page: Page, tools_tab: usize, model: &UiModel) -> Vec<Section> {
                 fields: vec![
                     field(
                         "power.always_on_usb",
-                        "关机 USB 供电",
-                        Toggle,
+                        "保持 USB 供电",
+                        Choice(vec![]),
                         "power.accessories.apply",
                     ),
                     field(

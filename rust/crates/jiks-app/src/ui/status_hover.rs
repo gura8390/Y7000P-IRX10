@@ -103,6 +103,11 @@ fn pair(a: Option<&str>, b: Option<&str>) -> String {
         if let Some((number, unit)) = value.split_once(' ') {
             if let Ok(number) = number.parse::<f64>() {
                 if number.is_finite() && matches!(unit, "MHz" | "°C" | "°F" | "W" | "RPM") {
+                    let unit = if unit == "RPM" {
+                        label("转", " RPM")
+                    } else {
+                        unit
+                    };
                     return format!("{number:.0}{unit}");
                 }
             }
@@ -123,7 +128,11 @@ fn watts(model: &UiModel, key: &str) -> Option<String> {
     } else {
         value
     };
-    Some(format!("{watts:+.2} W"))
+    Some(if watts == 0.0 {
+        "0.00 W".into()
+    } else {
+        format!("{watts:+.2} W")
+    })
 }
 
 fn rows(model: &UiModel, now: u64) -> [Option<DisplayRow>; ROWS.len()] {
@@ -185,7 +194,8 @@ fn rows(model: &UiModel, now: u64) -> [Option<DisplayRow>; ROWS.len()] {
         Some("Active") => (label("正在使用", "Active"), Some(0x004aaa61)),
         Some("Inactive") => (label("空闲", "Inactive"), Some(0x0041a5f2)),
         Some("PoweredOff") => (label("已断电", "Powered off"), Some(0x004f55c9)),
-        Some("MonitorConnected") => (label("连接显示器", "Display connected"), Some(0x004aaa61)),
+        // Direct/display-connected mode uses the detail row, as in the standard card.
+        Some("MonitorConnected") => ("", None),
         _ => ("—", None),
     };
     // This project targets the single 83NN configuration with a discrete GPU.
@@ -196,12 +206,14 @@ fn rows(model: &UiModel, now: u64) -> [Option<DisplayRow>; ROWS.len()] {
         dot,
     );
     if state != Some("PoweredOff") {
-        put(
-            Row::GpuPstate,
-            label("性能状态", "P-state"),
-            actual_pstate(model, now),
-            None,
-        );
+        let pstate = actual_pstate(model, now);
+        let enabled = label("启用", "Enabled");
+        let observed = match (state, pstate.as_str()) {
+            (Some("Active" | "Inactive" | "MonitorConnected"), "—") => enabled.into(),
+            (Some("Active" | "Inactive" | "MonitorConnected"), _) => format!("{enabled}, {pstate}"),
+            _ => pstate,
+        };
+        put(Row::GpuPstate, label("性能状态", "P-state"), observed, None);
         if sensors {
             put(
                 Row::GpuClockTemp,
@@ -224,7 +236,15 @@ fn rows(model: &UiModel, now: u64) -> [Option<DisplayRow>; ROWS.len()] {
         }
     }
     if sensors {
-        if let Some(speed) = metric(model, &["PchFanSpeed", "SystemFanSpeed"]) {
+        // A successful GetFeatureValue returning zero does not prove there
+        // is a third fan. The standard version requires a PCH fan endpoint.
+        let fan = metric(model, &["PchFanSpeed", "SystemFanSpeed"]).filter(|value| {
+            value
+                .strip_suffix(" RPM")
+                .and_then(|rpm| rpm.parse::<u32>().ok())
+                .is_some_and(|rpm| rpm > 0)
+        });
+        if let Some(speed) = fan {
             put(
                 Row::Fan,
                 label("系统风扇", "System fan"),
@@ -646,6 +666,12 @@ mod tests {
             value: "83 °C".into(),
             detail: String::new(),
         });
+        model.metrics.push(UiMetric {
+            key: "PchFanSpeed".into(),
+            label: "System fan".into(),
+            value: "0 RPM".into(),
+            detail: String::new(),
+        });
         for (key, value) in [
             ("power.mode", json!(255)),
             ("preset.active_name", json!("Gaming")),
@@ -667,6 +693,28 @@ mod tests {
         assert!(current[Row::GpuPstate as usize].is_none());
         assert_eq!(value(Row::BatteryRate), "-4.30 W");
         assert_eq!(value(Row::BatteryMode), "Conservation");
+        assert!(current[Row::Fan as usize].is_none());
+
+        model.metrics[1].value = "1400 RPM".into();
+        model
+            .values
+            .insert("gpu.state".into(), json!("MonitorConnected"));
+        let current = rows(&model, 1011);
+        assert_eq!(
+            current[Row::Fan as usize].as_ref().unwrap().value,
+            "1400 RPM"
+        );
+        assert!(
+            current[Row::Gpu as usize]
+                .as_ref()
+                .unwrap()
+                .value
+                .is_empty()
+        );
+        assert_eq!(
+            current[Row::GpuPstate as usize].as_ref().unwrap().value,
+            "Enabled, P0"
+        );
 
         model
             .values

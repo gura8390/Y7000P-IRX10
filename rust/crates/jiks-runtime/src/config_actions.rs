@@ -1868,6 +1868,10 @@ pub fn preset_to_ui(id: &str, preset: &JsonNode) -> Result<JsonNode> {
 }
 pub fn project(docs: &Documents) -> Result<UiProjection> {
     let mut output = UiProjection::default();
+    if let Some(document) = docs.get("gpu_oc") {
+        let enabled = document.root().get_ci("Enabled").and_then(JsonNode::as_bool).unwrap_or(false);
+        output.values.insert("gpu.oc.enabled".into(), json!(enabled));
+    }
     if let Some(root) = docs.get("integrations").map(SettingsDocument::root) {
         for (ui, key) in [
             ("integration.hwinfo", "HWiNFO"),
@@ -2462,6 +2466,16 @@ mod tests {
                 .is_none()
         );
         assert!(apply_action("settings.fields.save",&payload(json!({"document":"notifications","fields":{"/Notifications/ColorOverrides/CapsLockOn":{"R":256,"G":0,"B":0}}})),&d).is_err());
+    }
+    #[test]
+    fn gpu_overclock_toggle_projects_the_persisted_enabled_state() {
+        for enabled in [false, true] {
+            let document = SettingsDocument::from_root(JsonNode::parse(
+                &json!({"Enabled":enabled}).to_string(),
+            ).unwrap()).unwrap();
+            let projection = project(&BTreeMap::from([("gpu_oc".into(), document)])).unwrap();
+            assert_eq!(projection.values["gpu.oc.enabled"], json!(enabled));
+        }
     }
     #[test]
     fn manual_quick_actions_project_chosen_icon_without_translating_user_names() {

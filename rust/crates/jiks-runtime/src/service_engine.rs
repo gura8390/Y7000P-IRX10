@@ -903,6 +903,16 @@ impl Engine {
                             return Ok(());
                         }
                         if !matches!(pending.work.after, After::SnapshotRead { .. }) {
+                            if matches!(
+                                pending.action,
+                                A::SetRawMode(_) | A::Energy(_) | A::SetMapped { .. } | A::SetHybrid { .. }
+                            ) {
+                                // An acknowledged dashboard write must publish
+                                // its verified result before returning success.
+                                // A slow telemetry interval must not revert a
+                                // toggle or selector to the pre-write state.
+                                self.next_presentation = 0;
+                            }
                             self.publish_native(!matches!(pending.action, A::ChargeThreshold(_) | A::KillGpuApps { .. }))?;
                         }
                         pending.work.last = value;
@@ -3250,6 +3260,20 @@ mod lifecycle_tests {
             assert_eq!(std::fs::read(f.root.join(file)).unwrap(), old);
         }
         assert!(f.log.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn dashboard_write_ack_publishes_verified_readback_before_next_sensor_frame() {
+        let mut f = Fixture::new();
+        f.engine.cache.insert("power_modes".into(), json!({"current_raw":2,"modes":[{"raw":2,"name":"均衡"},{"raw":3,"name":"性能"}]}));
+        f.engine.publish_native(false).unwrap();
+        f.engine.next_presentation = u64::MAX;
+        let answer = f.answer();
+        f.engine.start_work(184, "power.apply", vec![A::SetRawMode(3)], After::Hardware).unwrap();
+        *answer.lock().unwrap() = Some(Ok(json!(3)));
+        f.engine.poll_write().unwrap();
+        let state = f.engine.state.lock().unwrap();
+        assert!(state.results.iter().any(|result| result.request_id == 184 && result.ok));
+        assert_eq!(state.values["power.mode"], 3);
     }
     #[test]
     fn verified_mode_ack_precedes_next_preset_even_when_metadata_reader_is_delayed() {
