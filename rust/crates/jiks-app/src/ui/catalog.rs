@@ -65,13 +65,13 @@ impl Page {
         }
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EditorKind {
     Preset,
     Automation,
     Macro,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum FieldKind {
     Toggle,
     Text,
@@ -80,14 +80,14 @@ pub enum FieldKind {
     Choice(Vec<UiChoice>),
     Collection(&'static str),
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Field {
     pub key: &'static str,
     pub label: &'static str,
     pub kind: FieldKind,
     pub capability: &'static str,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ActionKind {
     Execute {
         command: &'static str,
@@ -105,14 +105,14 @@ pub enum ActionKind {
     SensorSettings,
     Cancel(Vec<&'static str>),
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Action {
     pub accessibility_role: &'static str,
     pub label: &'static str,
     pub capability: &'static str,
     pub kind: ActionKind,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Section {
     pub title: String,
     pub hint: &'static str,
@@ -1113,6 +1113,9 @@ fn dashboard(model: &UiModel) -> Vec<Section> {
     power.title = tr_static("电源").into();
     power.hint = "";
     power.fields.retain(|f| f.key != "power.fnq_custom");
+    power.actions.retain(|a| !matches!(
+        a.kind, ActionKind::Execute { command: "power.apply", .. } | ActionKind::Cancel(_)
+    ));
     let mut battery = sections(Page::Battery, 0, model);
     power.fields.extend(
         battery[0]
@@ -1151,20 +1154,6 @@ fn dashboard(model: &UiModel) -> Vec<Section> {
             true,
             "preset.save",
         ),
-        execute(
-            "应用充电设置",
-            "battery.apply",
-            &["battery.mode", "battery.night_charge"],
-        ),
-        execute(
-            "应用供电设置",
-            "power.accessories.apply",
-            &[
-                "power.always_on_usb",
-                "power.instant_boot",
-                "power.flip_to_start",
-            ],
-        ),
     ]);
     power.actions.push(navigate("性能与温控", Page::Performance));
     let mut display = sections(Page::Display, 0, model);
@@ -1172,9 +1161,12 @@ fn dashboard(model: &UiModel) -> Vec<Section> {
     let mut graphics = display.remove(0);
     graphics.title = tr_static("图形").into();
     graphics.hint = "";
-    graphics.fields.extend(display[0].fields.iter().filter(|f| f.key == "selection.gpu.processes").cloned());
-    graphics.actions.extend(display[0].actions.iter().filter(|a| matches!(&a.kind,
-        ActionKind::Execute { command, .. } if matches!(*command, "gpu.refresh" | "gpu.processes.refresh"))).cloned());
+    graphics.actions.retain(|a| !matches!(
+        a.kind, ActionKind::Execute { command: "gpu.hybrid.apply", .. }
+    ));
+    graphics.fields.push(field("gpu.dashboard_state", "独立显卡", ReadOnly, ""));
+    graphics.fields.push(field("gpu.oc.enabled", "超频独立显卡", Toggle, "gpu.oc.apply"));
+    graphics.actions.push(doc("独显超频设置", "gpu_oc"));
     graphics.actions.push(navigate("独显管理与高级设置", Page::Graphics));
     let mut other = Section {
         title: tr_static("其他").into(),
@@ -1201,6 +1193,7 @@ fn dashboard(model: &UiModel) -> Vec<Section> {
     let switch_fields: Vec<_> = other.fields.iter().map(|field| field.key).collect();
     other.actions = vec![
         execute("应用设备开关", "keys.apply", &switch_fields),
+        navigate("键盘背光", Page::Keyboard),
         doc("自定义控制台", "dashboard"),
     ];
     configured_dashboard(vec![power, graphics, screen, other], model)
@@ -1216,7 +1209,7 @@ fn dashboard_item_fields(item: &str) -> &'static [&'static str] {
         "FlipToStart" => &["power.flip_to_start"],
         "HybridMode" => &["gpu.hybrid_mode"],
         "DiscreteGpu" => &[
-            "selection.gpu.processes",
+            "gpu.dashboard_state",
             "gpu.process.preference",
             "gpu.keep_awake",
             "gpu.locked_pstate",
@@ -1328,6 +1321,7 @@ fn configured_dashboard(original: Vec<Section>, model: &UiModel) -> Vec<Section>
                 },
                 ActionKind::Navigate(Page::Performance) => items.contains(&"PowerMode"),
                 ActionKind::Navigate(Page::Graphics) => ["DiscreteGpu", "OverclockDiscreteGpu"].iter().any(|key| items.contains(key)),
+                ActionKind::Navigate(Page::Keyboard) => fields.iter().any(|field| field.key.starts_with("keyboard.")),
                 ActionKind::Cancel(keys) => {
                     keys.iter().any(|key| fields.iter().any(|f| f.key == *key))
                 }

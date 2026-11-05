@@ -2,7 +2,7 @@
 //! and calls sync on its UI tick. This module only presents completed UI data.
 use super::{
     a11y, i18n,
-    native::{accent, font, ink, line, paper, wide},
+    native::{accent, font, ink, line, muted, paper, wide},
 };
 use crate::ui_model::UiModel;
 use anyhow::{Result, ensure};
@@ -17,19 +17,20 @@ use std::{
     ptr::{null, null_mut},
     rc::Rc,
     thread::{self, ThreadId},
-    time::{Duration, Instant},
 };
 use windows_sys::Win32::{
     Foundation::*,
     Graphics::Gdi::*,
     System::{LibraryLoader::GetModuleHandleW, SystemInformation::GetTickCount64},
-    UI::{Controls::*, WindowsAndMessaging::*},
+    UI::{Controls::*, HiDpi::GetDpiForWindow, WindowsAndMessaging::*},
 };
+
+#[path = "status_hover.rs"]
+mod hover;
 
 const CLASS: &str = "Jiks.StatusPopup.1";
 const CLOSE: u16 = 2;
 const FRESH_MS: u64 = 3000;
-const HIDE_DELAY: Duration = Duration::from_millis(350);
 
 fn small_revision(model: &UiModel) -> u64 {
     let mut hash = DefaultHasher::new();
@@ -128,6 +129,22 @@ fn actual_pstate(model: &UiModel, now: u64) -> String {
     id.filter(|id| *id < 16)
         .map(|id| format!("P{id}"))
         .unwrap_or_else(|| "—".into())
+}
+
+pub(super) fn dashboard_gpu_state(model: &UiModel, now: u64) -> String {
+    if !fresh(model, "gpu.state_at_tick_ms", now) {
+        return "—".into();
+    }
+    match model.values.get("gpu.state").and_then(Value::as_str) {
+        Some("Active" | "MonitorConnected") => {
+            let state = label("活跃", "Active");
+            let pstate = actual_pstate(model, now);
+            if pstate == "—" { state.into() } else { format!("{state} ({pstate})") }
+        }
+        Some("Inactive") => label("空闲", "Inactive").into(),
+        Some("PoweredOff") => label("已断电", "Powered off").into(),
+        _ => "—".into(),
+    }
 }
 fn row(output: &mut String, title: &str, value: impl AsRef<str>) {
     output.push_str(title);
@@ -372,22 +389,30 @@ impl From<RECT> for Bounds {
         }
     }
 }
-fn placement(work: Bounds, point: POINT, dpi: u32, pinned: bool) -> Bounds {
+fn placement(work: Bounds, point: POINT, dpi: u32, pinned: bool, size: (i32, i32)) -> Bounds {
     let scale = |n: i32| ((n as i64 * dpi.clamp(96, 768) as i64) / 96).min(i32::MAX as i64) as i32;
     let available_w = work.right.saturating_sub(work.left).max(1);
     let available_h = work.bottom.saturating_sub(work.top).max(1);
-    let width = scale(480).min(available_w);
-    let height = scale(680).min(available_h);
+    let width = scale(size.0).min(available_w);
+    let height = scale(size.1).min(available_h);
+    let anchored = |at: i32, size: i32, end: i32| {
+        let after = at.saturating_add(scale(8));
+        if after.saturating_add(size) <= end {
+            after
+        } else {
+            at.saturating_sub(size).saturating_sub(scale(8))
+        }
+    };
     let left = if pinned {
         work.left.saturating_add((available_w - width) / 2)
     } else {
-        point.x.saturating_sub(width).saturating_sub(scale(8))
+        anchored(point.x, width, work.right)
     }
     .clamp(work.left, work.right.saturating_sub(width).max(work.left));
     let top = if pinned {
         work.top.saturating_add((available_h - height) / 2)
     } else {
-        point.y.saturating_sub(height).saturating_sub(scale(8))
+        anchored(point.y, height, work.bottom)
     }
     .clamp(work.top, work.bottom.saturating_sub(height).max(work.top));
     Bounds {
@@ -397,16 +422,13 @@ fn placement(work: Bounds, point: POINT, dpi: u32, pinned: bool) -> Bounds {
         bottom: top.saturating_add(height),
     }
 }
-fn hide_due(pinned: bool, due: Option<Instant>, now: Instant, inside: bool) -> bool {
-    !pinned && !inside && due.is_some_and(|due| now >= due)
-}
 
 struct Callback {
     state: RefCell<State>,
     destroyed: Cell<bool>,
     close_requested: Cell<bool>,
-    hide_at: Cell<Option<Instant>>,
     pinned: Cell<bool>,
+    colors: Cell<(COLORREF, COLORREF, COLORREF, HBRUSH)>,
     pending_dpi: Cell<u32>,
     reflow: Cell<bool>,
 }
@@ -416,14 +438,15 @@ impl Callback {
             state: RefCell::new(State::new()),
             destroyed: Cell::new(false),
             close_requested: Cell::new(false),
-            hide_at: Cell::new(None),
             pinned: Cell::new(false),
+            colors: Cell::new((0, 0, 0, null_mut())),
             pending_dpi: Cell::new(0),
             reflow: Cell::new(false),
         }
     }
 }
 struct State {
+    compact: Option<hover::Panel>,
     body: HWND,
     close: HWND,
     font: HFONT,
@@ -462,6 +485,7 @@ impl State {
     }
     fn new() -> Self {
         Self {
+            compact: None,
             body: null_mut(),
             close: null_mut(),
             font: null_mut(),
@@ -491,6 +515,10 @@ impl State {
             }
             let w = rect.right.max(1);
             let h = rect.bottom.max(1);
+            if let Some(panel) = &self.compact {
+                panel.layout(w);
+                return;
+            }
             let header = self.s(48).min(h);
             if !self.body.is_null() {
                 MoveWindow(
@@ -517,8 +545,9 @@ impl State {
     }
     unsafe fn palette(&mut self, dpi: u32) -> Result<()> {
         unsafe {
-            let changed_font = self.font.is_null() || dpi != self.dpi;
-            if changed_font {
+            if let Some(panel) = &mut self.compact {
+                panel.apply_fonts(dpi)?;
+            } else if self.font.is_null() || dpi != self.dpi {
                 let body = font(dpi, 14, false);
                 let title = font(dpi, 18, true);
                 if body.is_null() || title.is_null() {
@@ -533,7 +562,6 @@ impl State {
                 let old = [self.font, self.title_font];
                 self.font = body;
                 self.title_font = title;
-                self.dpi = dpi;
                 for hwnd in [self.body, self.close] {
                     if !hwnd.is_null() {
                         SendMessageW(hwnd, WM_SETFONT, self.font as usize, 1);
@@ -558,6 +586,7 @@ impl State {
             self.ink = ink();
             self.accent = accent();
             self.line = line();
+            self.dpi = dpi;
             Ok(())
         }
     }
@@ -573,6 +602,15 @@ impl State {
                 && self.state_fresh == state
             {
                 return Ok(false);
+            }
+            if let Some(panel) = &mut self.compact {
+                let reflow = panel.update(model, now);
+                self.revision = model.revision;
+                self.small_revision = small;
+                self.language = i18n::language();
+                self.pstate_fresh = pstate;
+                self.state_fresh = state;
+                return Ok(reflow);
             }
             let next = format_status(model, now);
             if next == self.body_text {
@@ -630,12 +668,14 @@ impl Drop for State {
 struct Owned {
     hwnd: HWND,
     callback: Box<Callback>,
+    anchor: POINT,
 }
 impl Owned {
     fn new() -> Self {
         Self {
             hwnd: null_mut(),
             callback: Box::new(Callback::new()),
+            anchor: POINT { x: 0, y: 0 },
         }
     }
     unsafe fn create(
@@ -650,7 +690,6 @@ impl Owned {
             register()?;
             self.callback.pinned.set(pinned);
             self.callback.destroyed.set(false);
-            self.callback.state.borrow_mut().palette(dpi)?;
             self.hwnd = CreateWindowExW(
                 WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
                 wide(CLASS).as_ptr(),
@@ -672,46 +711,52 @@ impl Owned {
             );
             {
                 let mut state = self.callback.state.borrow_mut();
-                state.body = CreateWindowExW(
-                    0,
-                    wide("EDIT").as_ptr(),
-                    null(),
-                    WS_CHILD
-                        | WS_VISIBLE
-                        | WS_VSCROLL
-                        | ES_MULTILINE as u32
-                        | ES_READONLY as u32
-                        | ES_AUTOVSCROLL as u32
-                        | ES_NOHIDESEL as u32,
-                    0,
-                    0,
-                    1,
-                    1,
-                    self.hwnd,
-                    1usize as HMENU,
-                    GetModuleHandleW(null()),
-                    null(),
-                );
-                ensure!(!state.body.is_null(), "Cannot create status text");
-                state.close = CreateWindowExW(
-                    0,
-                    wide("BUTTON").as_ptr(),
-                    wide(label("关闭", "Close")).as_ptr(),
-                    WS_CHILD | BS_OWNERDRAW as u32,
-                    0,
-                    0,
-                    1,
-                    1,
-                    self.hwnd,
-                    CLOSE as usize as HMENU,
-                    GetModuleHandleW(null()),
-                    null(),
-                );
-                ensure!(!state.close.is_null(), "Cannot create status close button");
-                SendMessageW(state.body, EM_SETLIMITTEXT, 256 * 1024, 0);
-                SendMessageW(state.body, WM_SETFONT, state.font as usize, 0);
-                SendMessageW(state.close, WM_SETFONT, state.font as usize, 0);
-                state.annotate_controls(self.hwnd);
+                if !pinned {
+                    state.compact = Some(hover::Panel::create(self.hwnd, dpi)?);
+                } else {
+                    state.body = CreateWindowExW(
+                        0,
+                        wide("EDIT").as_ptr(),
+                        null(),
+                        WS_CHILD
+                            | WS_VISIBLE
+                            | WS_VSCROLL
+                            | ES_MULTILINE as u32
+                            | ES_READONLY as u32
+                            | ES_AUTOVSCROLL as u32
+                            | ES_NOHIDESEL as u32,
+                        0,
+                        0,
+                        1,
+                        1,
+                        self.hwnd,
+                        1usize as HMENU,
+                        GetModuleHandleW(null()),
+                        null(),
+                    );
+                    ensure!(!state.body.is_null(), "Cannot create status text");
+                    state.close = CreateWindowExW(
+                        0,
+                        wide("BUTTON").as_ptr(),
+                        wide(label("关闭", "Close")).as_ptr(),
+                        WS_CHILD | BS_OWNERDRAW as u32,
+                        0,
+                        0,
+                        1,
+                        1,
+                        self.hwnd,
+                        CLOSE as usize as HMENU,
+                        GetModuleHandleW(null()),
+                        null(),
+                    );
+                    ensure!(!state.close.is_null(), "Cannot create status close button");
+                    SendMessageW(state.body, EM_SETLIMITTEXT, 256 * 1024, 0);
+                    state.annotate_controls(self.hwnd);
+                }
+                state.palette(dpi)?;
+                self.callback
+                    .colors
+                    .set((state.paper, state.ink, muted(), state.brush));
                 state.layout(self.hwnd, pinned);
             }
             if visible {
@@ -786,11 +831,12 @@ impl StatusPopup {
     ) -> Result<()> {
         self.check_thread()?;
         self.reap();
-        let pinned = pinned
-            || self
-                .window
-                .as_ref()
-                .is_some_and(|window| window.callback.pinned.get());
+        if let Some(window) = &self.window {
+            if self.is_visible() && (!pinned || window.callback.pinned.get()) {
+                return Ok(());
+            }
+            self.hide()?;
+        }
         let dpi = dpi.clamp(96, 768);
         let (mut point, mut monitor_info) = (
             POINT { x: 0, y: 0 },
@@ -809,39 +855,37 @@ impl StatusPopup {
                 "Cannot read status work area"
             );
         }
-        let bounds = placement(monitor_info.rcWork.into(), point, dpi, pinned);
-        if self.window.is_none() {
-            self.window = Some(Owned::new());
-            let result = unsafe {
-                self.window
-                    .as_mut()
-                    .unwrap()
-                    .create(owner, dpi, pinned, bounds, false)
-            };
-            if let Err(error) = result {
-                let cleanup = self.hide();
-                return match cleanup {
-                    Ok(()) => Err(error),
-                    Err(cleanup) => Err(error.context(format!("{cleanup:#}"))),
-                };
-            }
-        }
-        let window = self.window.as_ref().unwrap();
-        window.callback.pinned.set(pinned);
-        window.callback.close_requested.set(false);
-        window.callback.hide_at.set(None);
+        let work = monitor_info.rcWork.into();
+        let bounds = placement(
+            work,
+            point,
+            dpi,
+            pinned,
+            if pinned { (480, 680) } else { (330, 320) },
+        );
+        let mut window = Owned::new();
+        unsafe { window.create(owner, dpi, pinned, bounds, false)? };
+        window.anchor = point;
         {
             let mut state = window.callback.state.borrow_mut();
             unsafe {
+                let dpi = GetDpiForWindow(window.hwnd).max(96).clamp(96, 768);
                 state.palette(dpi)?;
-                state.layout(window.hwnd, pinned);
+                window
+                    .callback
+                    .colors
+                    .set((state.paper, state.ink, muted(), state.brush));
                 state.update(model, GetTickCount64())?;
-                SetWindowTextW(
-                    window.hwnd,
-                    wide(label("拯救者工具箱 · 本机状态", "拯救者工具箱 · Status")).as_ptr(),
+                let bounds = placement(
+                    work,
+                    point,
+                    dpi,
+                    pinned,
+                    state
+                        .compact
+                        .as_ref()
+                        .map_or((480, 680), hover::Panel::size),
                 );
-                SetWindowTextW(state.close, wide(label("关闭", "Close")).as_ptr());
-                state.annotate_controls(window.hwnd);
                 ensure!(
                     SetWindowPos(
                         window.hwnd,
@@ -854,12 +898,17 @@ impl StatusPopup {
                     ) != 0,
                     "Cannot position status popup"
                 );
+                state.layout(window.hwnd, pinned);
             }
         }
         unsafe {
             ShowWindow(window.hwnd, SW_SHOWNOACTIVATE);
+            ensure!(
+                IsWindowVisible(window.hwnd) != 0,
+                "Status popup did not become visible"
+            );
         }
-        ensure!(self.is_visible(), "Status popup did not become visible");
+        self.window = Some(window);
         Ok(())
     }
     fn reap(&mut self) {
@@ -880,28 +929,14 @@ impl StatusPopup {
         if window.callback.close_requested.get() {
             return self.hide();
         }
-        let due = window.callback.hide_at.get();
-        if due.is_some() {
-            let (mut point, mut rect) = (POINT { x: 0, y: 0 }, unsafe { zeroed::<RECT>() });
-            let inside = unsafe {
-                GetCursorPos(&mut point) != 0
-                    && GetWindowRect(window.hwnd, &mut rect) != 0
-                    && point.x >= rect.left
-                    && point.x < rect.right
-                    && point.y >= rect.top
-                    && point.y < rect.bottom
-            };
-            if hide_due(window.callback.pinned.get(), due, Instant::now(), inside) {
-                return self.hide();
-            }
-        }
         let mut state = window.callback.state.borrow_mut();
         let dpi = window.callback.pending_dpi.replace(0);
         let reflow = window.callback.reflow.replace(false);
         let changed_palette = state.paper != paper()
             || state.ink != ink()
             || state.accent != accent()
-            || state.line != line();
+            || state.line != line()
+            || window.callback.colors.get().2 != muted();
         let changed_language = state.language != i18n::language();
         unsafe {
             let current_dpi = if dpi == 0 {
@@ -910,8 +945,13 @@ impl StatusPopup {
                 dpi.clamp(96, 768)
             };
             state.palette(current_dpi)?;
+            window
+                .callback
+                .colors
+                .set((state.paper, state.ink, muted(), state.brush));
             let updated = state.update(model, GetTickCount64())?;
-            if changed_language {
+            let pinned = window.callback.pinned.get();
+            if changed_language && pinned {
                 SetWindowTextW(
                     window.hwnd,
                     wide(label("拯救者工具箱 · 本机状态", "拯救者工具箱 · Status")).as_ptr(),
@@ -919,28 +959,27 @@ impl StatusPopup {
                 SetWindowTextW(state.close, wide(label("关闭", "Close")).as_ptr());
                 state.annotate_controls(window.hwnd);
             }
-            if reflow || dpi != 0 {
-                let mut rect: RECT = zeroed();
+            if reflow || dpi != 0 || (!pinned && updated) {
                 let mut info = MONITORINFO {
                     cbSize: size_of::<MONITORINFO>() as u32,
                     ..zeroed()
                 };
                 ensure!(
-                    GetWindowRect(window.hwnd, &mut rect) != 0
-                        && GetMonitorInfoW(
-                            MonitorFromWindow(window.hwnd, MONITOR_DEFAULTTONEAREST),
-                            &mut info
-                        ) != 0,
+                    GetMonitorInfoW(
+                        MonitorFromPoint(window.anchor, MONITOR_DEFAULTTONEAREST),
+                        &mut info
+                    ) != 0,
                     "Cannot refresh status work area"
                 );
                 let bounds = placement(
                     info.rcWork.into(),
-                    POINT {
-                        x: rect.right.saturating_add(state.s(8)),
-                        y: rect.bottom.saturating_add(state.s(8)),
-                    },
+                    window.anchor,
                     current_dpi,
-                    window.callback.pinned.get(),
+                    pinned,
+                    state
+                        .compact
+                        .as_ref()
+                        .map_or((480, 680), hover::Panel::size),
                 );
                 ensure!(
                     SetWindowPos(
@@ -955,23 +994,33 @@ impl StatusPopup {
                     "Cannot reposition status popup"
                 );
             }
-            if changed_palette || updated || changed_language || dpi != 0 || reflow {
-                state.layout(window.hwnd, window.callback.pinned.get());
-                InvalidateRect(window.hwnd, null(), 1);
-                InvalidateRect(state.body, null(), 1);
+            if updated || dpi != 0 || reflow {
+                if !pinned || dpi != 0 || reflow {
+                    state.layout(window.hwnd, pinned);
+                }
+            }
+            if changed_palette || dpi != 0 || reflow {
+                RedrawWindow(
+                    window.hwnd,
+                    null(),
+                    null_mut(),
+                    RDW_INVALIDATE | RDW_ALLCHILDREN,
+                );
+            } else if (!pinned && updated) || (pinned && changed_language) {
+                InvalidateRect(window.hwnd, null(), 0);
             }
         }
         Ok(())
     }
-    pub(super) fn schedule_hide(&mut self) {
-        if let Some(window) = &self.window {
-            if !window.callback.pinned.get() {
-                window
-                    .callback
-                    .hide_at
-                    .set(Some(Instant::now() + HIDE_DELAY));
-            }
+    pub(super) fn hide_hover(&mut self) -> Result<()> {
+        if self
+            .window
+            .as_ref()
+            .is_some_and(|window| !window.callback.pinned.get())
+        {
+            self.hide()?;
         }
+        Ok(())
     }
     pub(super) fn hide(&mut self) -> Result<()> {
         self.check_thread()?;
@@ -1063,6 +1112,22 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
             callback.reflow.set(true);
             return 0;
         }
+        if matches!(message, WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT) {
+            let (paper, ink, muted, brush) = callback.colors.get();
+            if !brush.is_null() {
+                let dc = w as HDC;
+                SetBkColor(dc, paper);
+                SetTextColor(
+                    dc,
+                    if hover::muted_control(GetDlgCtrlID(l as HWND)) {
+                        muted
+                    } else {
+                        ink
+                    },
+                );
+                return brush as isize;
+            }
+        }
         let Ok(state) = callback.state.try_borrow() else {
             return DefWindowProcW(hwnd, message, w, l);
         };
@@ -1072,12 +1137,6 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 0
             }
             WM_ERASEBKGND => 1,
-            WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT => {
-                let dc = w as HDC;
-                SetBkColor(dc, state.paper);
-                SetTextColor(dc, state.ink);
-                state.brush as isize
-            }
             WM_PAINT => {
                 let mut paint: PAINTSTRUCT = zeroed();
                 let dc = BeginPaint(hwnd, &mut paint);
@@ -1085,6 +1144,11 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                     let mut rect: RECT = zeroed();
                     GetClientRect(hwnd, &mut rect);
                     FillRect(dc, &rect, state.brush);
+                    if let Some(panel) = &state.compact {
+                        panel.paint(dc, rect.right, state.ink);
+                        EndPaint(hwnd, &paint);
+                        return 0;
+                    }
                     SetBkMode(dc, TRANSPARENT as i32);
                     SetTextColor(dc, state.accent);
                     let previous = SelectObject(dc, state.title_font);
@@ -1224,7 +1288,7 @@ mod tests {
             },
         ] {
             for pinned in [true, false] {
-                let result = placement(work, POINT { x: 9000, y: -9000 }, 384, pinned);
+                let result = placement(work, POINT { x: 9000, y: -9000 }, 384, pinned, (330, 320));
                 assert!(
                     result.left >= work.left
                         && result.top >= work.top
@@ -1233,11 +1297,17 @@ mod tests {
                 );
             }
         }
-        let now = Instant::now();
-        assert!(!hide_due(true, Some(now), now, false));
-        assert!(!hide_due(false, Some(now), now, true));
-        assert!(!hide_due(false, Some(now + HIDE_DELAY), now, false));
-        assert!(hide_due(false, Some(now), now, false));
+        let work = Bounds {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        };
+        let corner = placement(work, POINT { x: 1900, y: 1060 }, 96, false, (330, 320));
+        assert_eq!(corner.right, 1892);
+        assert_eq!(corner.bottom, 1040);
+        let opening = placement(work, POINT { x: 200, y: 200 }, 96, false, (330, 320));
+        assert_eq!((opening.left, opening.top), (208, 208));
     }
     #[test]
     fn construction_is_inert_failed_close_retains_owner_and_destroyed_generation_is_not_reused() {

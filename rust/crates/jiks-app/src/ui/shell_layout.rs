@@ -1,10 +1,10 @@
 //! Dimensions in device-independent pixels. Painting, hit testing, and scroll
 //! clipping share the same bounds.
 
-pub(super) const CONTENT_X: i32 = 108;
+pub(super) const CONTENT_X: i32 = 96;
 pub(super) const CONTENT_RIGHT: i32 = 20;
-pub(super) const VIEW_TOP: i32 = 96;
-pub(super) const FOOTER_HEIGHT: i32 = 48;
+pub(super) const VIEW_TOP: i32 = 36;
+pub(super) const FOOTER_HEIGHT: i32 = 36;
 pub(super) const GROUP_GAP: i32 = 16;
 pub(super) const CONTROL_HEIGHT: i32 = 34;
 

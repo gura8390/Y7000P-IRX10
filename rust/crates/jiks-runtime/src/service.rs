@@ -12,17 +12,17 @@ use std::{
     },
 };
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capability {
     pub available: bool,
     pub reason: String,
 }
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Choice {
     pub label: String,
     pub value: Value,
 }
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Range {
     pub minimum: i32,
     pub maximum: i32,
@@ -54,7 +54,7 @@ mod arc_value {
         Ok(Arc::new(Value::deserialize(deserializer)?))
     }
 }
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
     pub id: String,
     pub label: String,

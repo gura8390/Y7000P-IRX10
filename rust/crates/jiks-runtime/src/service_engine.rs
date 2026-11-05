@@ -559,19 +559,9 @@ impl Engine {
         projection.metrics.extend(self.fps.metrics());
         state.metrics = projection.metrics;
         if let Some(step_capabilities) = step_capabilities {
-            let mut capabilities = state.capabilities.as_ref().clone();
-            capabilities.extend(projection.capabilities);
-            capabilities.extend(step_capabilities);
-            state.capabilities = Arc::new(capabilities);
-            let mut options = state.options.as_ref().clone();
-            options.extend(projection.options);
-            state.options = Arc::new(options);
-            let mut collections = state.collections.as_ref().clone();
-            collections.extend(projection.collections);
-            state.collections = Arc::new(collections);
+            projection.capabilities.extend(step_capabilities);
             if let Some(information) = self.cache.get("device.information") {
-                let mut collections = state.collections.as_ref().clone();
-                collections.insert(
+                projection.collections.insert(
                     "device.information".into(),
                     vec![Item {
                         id: "current".into(),
@@ -580,10 +570,19 @@ impl Engine {
                         value: information.clone(),
                     }],
                 );
-                state.collections = Arc::new(collections);
             }
-            state.ranges = Arc::new(projection.ranges);
-            state.metadata_revision += 1;
+            let capabilities_changed =
+                extend_changed(&mut state.capabilities, projection.capabilities);
+            let options_changed = extend_changed(&mut state.options, projection.options);
+            let collections_changed =
+                extend_changed(&mut state.collections, projection.collections);
+            let ranges_changed = state.ranges.as_ref() != &projection.ranges;
+            if ranges_changed {
+                state.ranges = Arc::new(projection.ranges);
+            }
+            if capabilities_changed || options_changed || collections_changed || ranges_changed {
+                state.metadata_revision += 1;
+            }
         }
         state.revision += 1;
         Ok(())
@@ -2452,6 +2451,19 @@ impl Engine {
         }
     }
 }
+// Non-telemetry reads may finish repeatedly with identical presentation
+// metadata. Retain the shared maps and the metadata generation in that case.
+fn extend_changed<T: Clone + Eq>(
+    current: &mut Arc<BTreeMap<String, T>>,
+    additions: BTreeMap<String, T>,
+) -> bool {
+    if additions.iter().all(|(key, value)| current.get(key) == Some(value)) {
+        return false;
+    }
+    Arc::make_mut(current).extend(additions);
+    true
+}
+
 fn config_command(command: &str) -> bool {
     matches!(
         command,
@@ -2649,6 +2661,38 @@ mod lifecycle_tests {
             );
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+    #[test]
+    fn repeated_native_reads_only_advance_metadata_when_controls_change() {
+        let mut f = Fixture::new();
+        f.engine.repository.save(
+            "application",
+            SettingsDocument::parse(r#"{"EnableHardwareSensors":true}"#).unwrap(),
+        ).unwrap();
+        f.engine.cache.insert("telemetry".into(), json!({"cpu_utilization_percent":12.5}));
+        f.engine.publish_native(false).unwrap();
+        let initial = f.engine.state.lock().unwrap().clone();
+        f.engine.cache.insert("telemetry".into(), json!({"cpu_utilization_percent":15.5}));
+        f.engine.publish_native(false).unwrap();
+        let next = f.engine.state.lock().unwrap().clone();
+        assert!(next.revision > initial.revision);
+        assert_eq!(next.metadata_revision, initial.metadata_revision);
+        assert!(Arc::ptr_eq(&initial.capabilities, &next.capabilities));
+        assert!(Arc::ptr_eq(&initial.options, &next.options));
+        assert!(Arc::ptr_eq(&initial.collections, &next.collections));
+        assert!(Arc::ptr_eq(&initial.ranges, &next.ranges));
+        let metric = |state: &Snapshot| state.metrics.iter()
+            .find(|metric| metric.key == "CpuUtilization")
+            .unwrap().value.clone();
+        assert_ne!(metric(&next), metric(&initial));
+
+        f.engine.cache.insert("gpu.processes".into(), json!({"processes":[]}));
+        f.engine.publish_native(false).unwrap();
+        let changed = f.engine.state.lock().unwrap().clone();
+        assert!(changed.collections.contains_key("gpu.processes"));
+        assert_eq!(changed.metadata_revision, next.metadata_revision + 1);
+        f.engine.publish_native(false).unwrap();
+        assert_eq!(f.engine.state.lock().unwrap().metadata_revision, changed.metadata_revision);
     }
     #[test]
     fn late_completion_never_dispatches_the_remaining_hardware_plan() {

@@ -53,6 +53,8 @@ impl UiBridge {
 #[derive(Debug, Default)]
 pub struct UiDiagnostics {
     pub main_rebuilds: AtomicU64,
+    pub main_full_paints: AtomicU64,
+    pub main_metric_text_updates: AtomicU64,
     pub reentrant_defaults: AtomicU64,
     pub modals_opened: AtomicU64,
     pub modals_closed: AtomicU64,
@@ -76,6 +78,8 @@ pub struct UiDiagnostics {
 impl UiDiagnostics {
     pub fn snapshot(&self) -> Value {
         serde_json::json!({"main_rebuilds":self.main_rebuilds.load(Ordering::Relaxed),
+            "main_full_paints":self.main_full_paints.load(Ordering::Relaxed),
+            "main_metric_text_updates":self.main_metric_text_updates.load(Ordering::Relaxed),
             "reentrant_defaults":self.reentrant_defaults.load(Ordering::Relaxed),
             "modals_opened":self.modals_opened.load(Ordering::Relaxed),
             "modals_closed":self.modals_closed.load(Ordering::Relaxed),
@@ -120,7 +124,7 @@ impl UiAction {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct UiChoice {
     pub label: String,
     pub value: Value,

@@ -2,13 +2,15 @@
 //! These explain controls, not runtime implementation details.
 pub(super) fn field_hint(key: &str) -> &'static str {
     match key {
-        "power.mode" => "选择性能模式；自定义模式可进一步配置功耗、风扇与温度限制。",
-        "battery.mode" => "选择电池充电策略，兼顾续航与长期电池维护。",
+        "power.mode" => "选择性能模式\n你可以通过快捷键 Fn+Q 快速更改。",
+        "battery.mode" => "选择电池充电模式，养护模式将限制电池充电电量以提高寿命，快充模式将使用更高的功率充电。",
         "battery.start_threshold" => "电量低于此值时开始充电。",
         "battery.stop_threshold" => "充电达到此值后停止，减少长期满电停留。",
-        "battery.night_charge" => "根据夜间使用习惯优化充电。",
-        "power.always_on_usb" => "允许支持的 USB 接口在关机后继续供电。",
-        "gpu.hybrid_mode" => "选择核显与独显的工作方式。部分模式需要重启。",
+        "battery.night_charge" => "插电过夜时先充至 80%，在您早上使用设备时充至 100%。",
+        "power.always_on_usb" => "在电脑关机、睡眠或休眠时保持 USB 接口供电。\n一般为笔记本侧面标有电池标志的 USB 接口受此项控制。",
+        "gpu.hybrid_mode" => "根据你的使用场景选择显卡工作模式。\n混合模式与独显模式互相切换后需要重启生效。",
+        "gpu.dashboard_state" => "查看独显状态与占用应用。强制休眠可能影响正在使用显卡的应用。",
+        "gpu.oc.enabled" => "使用已保存的独显超频配置。可在设置中查看频率和电压参数。",
         "selection.gpu.processes" => "查看正在使用独立显卡的应用。",
         "gpu.keep_awake" => "保持独显处于唤醒状态，会增加待机耗电。",
         "display.resolution" => "更改当前显示器的分辨率。",
@@ -44,6 +46,14 @@ pub(super) fn field_hint(key: &str) -> &'static str {
 }
 
 pub(super) fn field_icon(key: &str) -> u32 {
+    match key {
+        "power.mode" => return 9,
+        "battery.night_charge" => return 10,
+        "gpu.hybrid_mode" => return 11,
+        "gpu.dashboard_state" | "gpu.oc.enabled" => return 12,
+        "power.always_on_usb" => return 13,
+        _ => {}
+    }
     if key.contains("keyboard") || key.contains("lock") {
         1
     } else if key.contains("battery") || key.contains("charge") {

@@ -26,16 +26,15 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use windows_sys::Win32::Graphics::Dwm::{
-    DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
-    DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute,
+    DWMWA_BORDER_COLOR, DWMWA_CAPTION_BUTTON_BOUNDS, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DwmDefWindowProc, DwmExtendFrameIntoClientArea,
+    DwmGetWindowAttribute, DwmSetWindowAttribute,
 };
 
 // Stable Windows SDK constants omitted/gated in windows-sys metadata.
 pub(super) const SS_LEFT: u32 = 0;
 const SS_CENTER: u32 = 1;
 const SS_RIGHT: u32 = 2;
-const SS_ICON: u32 = 3;
-const STM_SETICON: u32 = 0x0170;
 const SS_NOPREFIX: u32 = 0x0080;
 const SS_CENTERIMAGE: u32 = 0x0200;
 const SS_ENDELLIPSIS: u32 = 0x4000;
@@ -172,10 +171,10 @@ pub(super) unsafe fn apply_window_chrome(hwnd: HWND) {
 const WM_TRAY: u32 = WM_APP + 31;
 const WM_RELAYOUT: u32 = WM_APP + 32;
 const TIMER: usize = 1;
+const TRAY_HOVER_TIMER: usize = 2;
+const TRAY_HOVER_DELAY: Duration = Duration::from_millis(500);
 const ID_NAV: u16 = 100;
-const ID_EXIT: u16 = 120;
 const ID_DEVICE: u16 = 180;
-const ID_LOG: u16 = 181;
 const ID_THEME: u16 = 182;
 const ID_NAV_LIST: u16 = 190;
 const ID_TOOL_NAV: u16 = 140;
@@ -183,6 +182,98 @@ const ID_TRAY_OPEN: usize = 300;
 const ID_TRAY_EXIT: usize = 301;
 const ID_TRAY_STATUS: usize = 302;
 const ID_QUICK: usize = 6000;
+const CAPTION_HEIGHT: i32 = 32;
+const CAPTION_PROPERTY: windows_sys::core::PCWSTR = windows_sys::w!("Jiks.MainCaption");
+const MAIN_TOOLBAR: [(u16, &str); 2] = [(ID_DEVICE, "device.details"), (ID_THEME, "app.preferences.save")];
+
+fn main_nav() -> impl Iterator<Item = (usize, Page)> {
+    Page::ALL.into_iter().enumerate().filter(|(_, page)| *page != Page::Keyboard)
+}
+
+fn active_navigation(page: Page) -> Page {
+    match page {
+        Page::Keyboard | Page::Performance | Page::Display | Page::Graphics => Page::Dashboard,
+        _ => page,
+    }
+}
+
+fn device_badge(model: &UiModel) -> String {
+    let name = model.machine.split('·').next().unwrap_or("").trim();
+    if name.starts_with("Y7000P") { format!("Legion {name}") } else { name.to_owned() }
+}
+
+unsafe fn extend_main_caption(hwnd: HWND, dpi: u32) -> bool {
+    unsafe {
+        let margins = MARGINS {
+            cxLeftWidth: 0,
+            cxRightWidth: 0,
+            cyTopHeight: CAPTION_HEIGHT * dpi as i32 / 96,
+            cyBottomHeight: 0,
+        };
+        DwmExtendFrameIntoClientArea(hwnd, &margins) >= 0
+    }
+}
+
+unsafe fn caption_reserved_width(hwnd: HWND, dpi: u32) -> i32 {
+    unsafe {
+        let mut buttons: RECT = zeroed();
+        if DwmGetWindowAttribute(
+            hwnd, DWMWA_CAPTION_BUTTON_BOUNDS as u32, (&mut buttons as *mut RECT).cast(),
+            size_of::<RECT>() as u32,
+        ) >= 0 && buttons.right > buttons.left {
+            ((buttons.right - buttons.left) * 96 + dpi as i32 - 1) / dpi as i32 + 6
+        } else {
+            150
+        }
+    }
+}
+
+/// Extend only the caption into the client. DefWindowProc keeps the original
+/// sizing borders and scroll bar, and DWM owns the native caption buttons.
+unsafe fn main_caption_message(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> Option<isize> {
+    unsafe {
+        if GetPropW(hwnd, CAPTION_PROPERTY).is_null() {
+            return None;
+        }
+        if msg == WM_NCCALCSIZE && lp != 0 {
+            DefWindowProcW(hwnd, msg, wp, lp);
+            // RECT and NCCALCSIZE_PARAMS both start with the proposed client RECT.
+            let client = &mut *(lp as *mut RECT);
+            let height = GetSystemMetricsForDpi(SM_CYCAPTION, GetDpiForWindow(hwnd).max(96));
+            client.top -= height;
+            return Some(0);
+        }
+        if matches!(msg, WM_NCHITTEST | WM_NCMOUSEMOVE | WM_NCMOUSELEAVE
+            | WM_NCLBUTTONDOWN | WM_NCLBUTTONUP | WM_NCLBUTTONDBLCLK
+            | WM_NCPAINT | WM_NCACTIVATE) {
+            let mut result = 0;
+            if DwmDefWindowProc(hwnd, msg, wp, lp, &mut result) != 0 {
+                return Some(result);
+            }
+        }
+        if msg == WM_NCHITTEST {
+            let result = DefWindowProcW(hwnd, msg, wp, lp);
+            if result != HTCLIENT as isize {
+                return Some(result);
+            }
+            let mut point = POINT { x: lp as i16 as i32, y: (lp >> 16) as i16 as i32 };
+            if ScreenToClient(hwnd, &mut point) != 0
+                && (0..CAPTION_HEIGHT * GetDpiForWindow(hwnd).max(96) as i32 / 96).contains(&point.y)
+            {
+                let child = ChildWindowFromPointEx(hwnd, point, CWP_SKIPINVISIBLE);
+                if !matches!(GetDlgCtrlID(child) as u16, ID_DEVICE | ID_THEME) {
+                    return Some(HTCAPTION as isize);
+                }
+            }
+            return Some(result);
+        }
+        if msg == WM_NCDESTROY {
+            RemovePropW(hwnd, CAPTION_PROPERTY);
+        }
+        None
+    }
+}
+const METRIC_METER: usize = 0x4A494D54;
 const TOOL_KEYS: [&str; 8] = [
     "behavior",
     "appearance",
@@ -214,13 +305,144 @@ fn action_key(action: &Action) -> String {
 
 fn metric_caption(metric: &UiMetric, compact: bool) -> &str {
     if !compact { return &metric.label; }
+    let standard_caption = match metric.key.as_str() {
+        "CpuUtilization" | "GpuUtilization" | "MemoryUtilization" => "利用率",
+        "CpuFrequency" | "GpuFrequency" => "核心频率",
+        "CpuFanSpeed" | "GpuFanSpeed" | "PchFanSpeed" => "风扇",
+        "CpuTemperature" => "温度",
+        "GpuCoreTemperature" => "核心温度",
+        "GpuVramTemperature" => "显存温度",
+        "GpuVramUtilization" => "显存占用",
+        "CpuPower" | "GpuPower" => "功耗",
+        "PchTemperature" => "南桥",
+        _ => "",
+    };
+    if !standard_caption.is_empty() {
+        return super::i18n::tr_static(standard_caption);
+    }
     let caption = metric.label.trim_start_matches("CPU ").trim_start_matches("GPU ");
     caption.split_once('（').map_or(caption, |(head, _)| head.trim())
+}
+
+fn metric_meter_scale(key: &str) -> usize {
+    match key {
+        "CpuUtilization" | "GpuUtilization" | "GpuVramUtilization" | "MemoryUtilization"
+        | "CpuTemperature" | "PchTemperature" => 100,
+        "CpuFrequency" => 6000,
+        "GpuFrequency" => 3000,
+        _ => 0,
+    }
+}
+
+fn dashboard_direct_command(key: &str) -> Option<&'static str> {
+    match key {
+        "power.mode" => Some("power.apply"),
+        "battery.mode" | "battery.night_charge" => Some("battery.apply"),
+        "power.always_on_usb" | "power.instant_boot" | "power.flip_to_start" => Some("power.accessories.apply"),
+        "gpu.hybrid_mode" => Some("gpu.hybrid.apply"),
+        "gpu.oc.enabled" => Some("gpu.oc.apply"),
+        _ => None,
+    }
+}
+
+fn metric_meter_fraction(value: &str, scale: usize) -> f32 {
+    let numeric = value.split_whitespace().next().map(|v| v.trim_end_matches('%'))
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite()).unwrap_or(0.0);
+    let numeric = if value.ends_with("°F") { (numeric - 32.0) / 1.8 }
+        else if value.ends_with("GHz") { numeric * 1000.0 }
+        else { numeric };
+    (numeric / scale as f32).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+#[test]
+fn dashboard_meter_uses_value_units_and_keeps_unavailable_samples_empty() {
+    assert_eq!(metric_meter_fraction("51.5%", 100), 0.515);
+    assert_eq!(metric_meter_fraction("3.0 GHz", 6000), 0.5);
+    assert_eq!(metric_meter_fraction("122 °F", 100), 0.5);
+    assert_eq!(metric_meter_fraction("—", 100), 0.0);
+    assert_eq!(metric_meter_fraction("120%", 100), 1.0);
+}
+
+// The reading and its meter share one native control. A text change paints
+// only that control and the system accessibility provider keeps its text.
+unsafe extern "system" fn metric_meter_paint(
+    hwnd: HWND, msg: u32, wp: usize, lp: isize, id: usize, scale: usize,
+) -> isize {
+    unsafe {
+        if matches!(msg, WM_PAINT | WM_PRINTCLIENT) {
+            let mut ps: PAINTSTRUCT = zeroed();
+            let dc = if msg == WM_PAINT { BeginPaint(hwnd, &mut ps) } else { wp as HDC };
+            let saved = SaveDC(dc);
+            let mut rect: RECT = zeroed();
+            GetClientRect(hwnd, &mut rect);
+            fill(dc, &rect, surface());
+            let dpi = GetDpiForWindow(hwnd).max(96) as i32;
+            let meter_width = 32 * dpi / 96;
+            let meter_height = 5 * dpi / 96;
+            let top = (rect.bottom - meter_height) / 2;
+            let track = RECT {
+                left: rect.right - meter_width,
+                top,
+                right: rect.right,
+                bottom: top + meter_height,
+            };
+            let reading = get_text(hwnd);
+            fill(dc, &track, line());
+            let filled = (meter_width as f32 * metric_meter_fraction(&reading, scale)).round() as i32;
+            if filled > 0 {
+                fill(dc, &RECT { right: track.left + filled, ..track }, accent());
+            }
+            rect.right = track.left - 5 * dpi / 96;
+            SelectObject(dc, SendMessageW(hwnd, WM_GETFONT, 0, 0) as HFONT);
+            SetTextColor(dc, ink());
+            SetBkMode(dc, TRANSPARENT as i32);
+            DrawTextW(dc, wide(&reading).as_ptr(), -1, &mut rect,
+                DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+            RestoreDC(dc, saved);
+            if msg == WM_PAINT { EndPaint(hwnd, &ps); }
+            return 0;
+        }
+        if msg == WM_ERASEBKGND { return 1; }
+        if msg == WM_NCDESTROY { RemoveWindowSubclass(hwnd, Some(metric_meter_paint), id); }
+        let result = DefSubclassProc(hwnd, msg, wp, lp);
+        if msg == WM_SETTEXT && result != 0 {
+            InvalidateRect(hwnd, null(), 0);
+        }
+        result
+    }
 }
 
 fn field_available(model: &UiModel, key: &str, capability: &str) -> bool {
     model.capabilities.get(key).map(|cap| cap.available)
         .unwrap_or_else(|| capability.is_empty() || model.can(capability))
+}
+
+const GPU_PROCESS_SELECTOR: &str = "selection.gpu.processes";
+
+fn collection_choices(model: &UiModel, key: &str) -> Vec<UiChoice> {
+    model.collections.get(key).into_iter().flatten().map(|item| {
+        let name = if item.detail.is_empty() {
+            item.label.clone()
+        } else {
+            format!("{} · {}", item.label, item.detail)
+        };
+        UiChoice::new(name, item.id.clone())
+    }).collect()
+}
+
+fn gpu_process_choices(model: &UiModel) -> Vec<UiChoice> {
+    let mut choices = collection_choices(model, "gpu.processes");
+    let prompt = if !choices.is_empty() {
+        "请选择"
+    } else if model.collections.contains_key("gpu.processes") {
+        "无占用应用"
+    } else {
+        "尚未读取"
+    };
+    choices.insert(0, UiChoice::new(super::i18n::tr_static(prompt), Value::Null));
+    choices
 }
 
 fn field_options(model: &UiModel, field: &catalog::Field) -> Option<Vec<UiChoice>> {
@@ -234,10 +456,7 @@ fn field_options(model: &UiModel, field: &catalog::Field) -> Option<Vec<UiChoice
             }
             Some(options)
         }
-        FieldKind::Collection(key) => Some(model.collections.get(*key).into_iter().flatten().map(|item| {
-            let name = if item.detail.is_empty() { item.label.clone() } else { format!("{} · {}", item.label, item.detail) };
-            UiChoice::new(name, item.id.clone())
-        }).collect()),
+        FieldKind::Collection(key) => Some(collection_choices(model, key)),
         _ => None,
     }
 }
@@ -264,6 +483,14 @@ fn field_display(options: &[UiChoice], value: &Value, empty: &str) -> String {
         Some(false) => super::i18n::tr("关闭").into_owned(),
         None => scalar(value),
     }
+}
+
+fn field_value(model: &UiModel, key: &str) -> Value {
+    if key == "gpu.dashboard_state" {
+        let now = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() };
+        return json!(super::status_popup::dashboard_gpu_state(model, now));
+    }
+    model.value(key)
 }
 
 fn backend_state(model: &UiModel) -> u8 {
@@ -297,6 +524,69 @@ fn status_caption(model: &UiModel) -> &str {
 
 fn toolbar_available(model: &UiModel, id: u16, command: &str) -> bool {
     (id == ID_THEME && model.value("backend.read_only").as_bool() == Some(true)) || model.can(command)
+}
+
+fn field_help(model: &UiModel, field: &catalog::Field) -> Option<String> {
+    model.capabilities.get(field.key)
+        .filter(|cap| !cap.available)
+        .map(|cap| cap.reason.clone())
+        .or_else(|| (!field.capability.is_empty() && !model.can(field.capability))
+            .then(|| model.unavailable_reason(field.capability)))
+        .filter(|reason| !reason.is_empty())
+}
+
+fn action_disabled_reason(model: &UiModel, action: &Action) -> Option<String> {
+    (!action.capability.is_empty() && !model.can(action.capability))
+        .then(|| model.unavailable_reason(action.capability))
+}
+
+#[derive(PartialEq)]
+struct DashboardFieldStructure {
+    options: Option<Vec<UiChoice>>,
+    available: bool,
+    bounds: Option<(i32, i32)>,
+    empty: String,
+    help: Option<String>,
+}
+
+/// Compare the data used to create dashboard controls. Documents and choices
+/// for other pages can change while this page retains its existing windows.
+#[derive(PartialEq)]
+struct DashboardStructure {
+    sections: Vec<catalog::Section>,
+    fields: Vec<DashboardFieldStructure>,
+    action_disabled_reasons: Vec<Option<String>>,
+    compact: bool,
+    sensors_enabled: bool,
+    new_sensor_dashboard: bool,
+    dashboard_settings: Option<Value>,
+    sensor_settings: Option<Value>,
+}
+impl DashboardStructure {
+    fn new(model: &UiModel, sections: &[catalog::Section]) -> Self {
+        Self {
+            sections: sections.to_vec(),
+            fields: sections.iter().flat_map(|section| &section.fields).map(|field| {
+                let process_selector = field.key == GPU_PROCESS_SELECTOR;
+                DashboardFieldStructure {
+                    options: if process_selector { None } else { field_options(model, field) },
+                    available: field_available(model, field.key, field.capability),
+                    bounds: model.ranges.get(field.key)
+                        .filter(|_| matches!(field.kind, FieldKind::Number))
+                        .map(|range| (range.minimum, range.maximum)),
+                    empty: if process_selector { String::new() } else { field_empty_text(model, field) },
+                    help: field_help(model, field),
+                }
+            }).collect(),
+            action_disabled_reasons: sections.iter().flat_map(|section| &section.actions)
+                .map(|action| action_disabled_reason(model, action)).collect(),
+            compact: model.preferences.compact,
+            sensors_enabled: model.value("sensors.enabled").as_bool() == Some(true),
+            new_sensor_dashboard: model.value("sensors.new_dashboard").as_bool() == Some(true),
+            dashboard_settings: model.documents.get("dashboard").map(|doc| doc.value.clone()),
+            sensor_settings: model.documents.get("sensor_dashboard").map(|doc| doc.value.clone()),
+        }
+    }
 }
 static REQUEST: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, PartialEq, Eq)]
@@ -607,13 +897,11 @@ fn navigation_target(page: Page, key: u32, ctrl: bool, shift: bool) -> Option<Pa
         return Page::ALL.get((key - 0x31) as usize).copied();
     }
     if key == 0x09 {
-        let index = Page::ALL
-            .iter()
-            .position(|candidate| *candidate == page)
-            .unwrap_or(0);
-        return Some(
-            Page::ALL[(index + if shift { Page::ALL.len() - 1 } else { 1 }) % Page::ALL.len()],
-        );
+        let active = active_navigation(page);
+        let count = main_nav().count();
+        let index = main_nav().position(|(_, candidate)| candidate == active).unwrap_or(0);
+        let next = (index + if shift { count - 1 } else { 1 }) % count;
+        return main_nav().nth(next).map(|(_, page)| page);
     }
     None
 }
@@ -630,6 +918,8 @@ mod navigation_tests {
             navigation_target(Page::About, 9, true, false),
             Some(Page::Dashboard)
         );
+        assert_eq!(navigation_target(Page::Dashboard, 9, true, false), Some(Page::Battery));
+        assert_eq!(navigation_target(Page::Dashboard, 0x32, true, false), Some(Page::Keyboard));
         assert_eq!(
             navigation_target(Page::Battery, 0x31, true, false),
             Some(Page::Dashboard)
@@ -721,6 +1011,22 @@ pub(super) fn scalar(value: &Value) -> String {
         Value::Null => String::new(),
         Value::String(s) => s.clone(),
         _ => value.to_string(),
+    }
+}
+unsafe fn text_if_changed(hwnd: HWND, value: &str) -> bool {
+    unsafe {
+        if hwnd.is_null() || get_text(hwnd) == value {
+            return false;
+        }
+        text(hwnd, value);
+        true
+    }
+}
+unsafe fn enable_if_changed(hwnd: HWND, enabled: bool) {
+    unsafe {
+        if !hwnd.is_null() && (IsWindowEnabled(hwnd) != 0) != enabled {
+            EnableWindow(hwnd, enabled as i32);
+        }
     }
 }
 pub(super) unsafe fn message(hwnd: HWND, title: &str, body: &str, error: bool) {
@@ -1200,24 +1506,32 @@ pub(super) unsafe fn paint_card(dc: HDC, rect: &RECT, dpi: u32) {
 }
 pub(super) unsafe fn paint_button(item: &DRAWITEMSTRUCT, selected: bool) {
     unsafe {
+        if !GetPropW(item.hwndItem, windows_sys::w!("Jiks.CaptionTool")).is_null() {
+            paint_caption_tool(item);
+            return;
+        }
         let saved_dc = SaveDC(item.hDC);
         let disabled = item.itemState & ODS_DISABLED != 0;
         let pressed = item.itemState & ODS_SELECTED != 0;
-        let navigation = (item.CtlID >= ID_NAV as u32
-            && item.CtlID < ID_NAV as u32 + Page::ALL.len() as u32)
+        let main_navigation =
+            item.CtlID >= ID_NAV as u32 && item.CtlID < ID_NAV as u32 + Page::ALL.len() as u32;
+        let navigation = main_navigation
             || (item.CtlID >= ID_TOOL_NAV as u32 && item.CtlID < ID_TOOL_NAV as u32 + 8);
         let hovered = !GetPropW(item.hwndItem, wide("Jiks.Button.Hover").as_ptr()).is_null();
-        let background = if selected || pressed || (!disabled && hovered) {
+        let background = if main_navigation && selected {
+            surface()
+        } else if selected || pressed || (!disabled && hovered) {
             PALETTE.with(|p| p.get().pressed)
         } else if navigation {
             paper()
         } else {
             surface()
         };
-        fill(item.hDC, &item.rcItem, background);
-        let pen = CreatePen(PS_SOLID, 1, if navigation { background } else { line() });
+        fill(item.hDC, &item.rcItem, if main_navigation { paper() } else { background });
+        let pen = CreatePen(PS_SOLID, 1, if !navigation || (main_navigation && selected) { line() } else { background });
         let old_pen = SelectObject(item.hDC, pen);
-        let old_brush = SelectObject(item.hDC, GetStockObject(NULL_BRUSH));
+        let brush = if main_navigation { presentation_brush(background) } else { GetStockObject(NULL_BRUSH) };
+        let old_brush = SelectObject(item.hDC, brush);
         let dpi = GetDpiForWindow(item.hwndItem).max(96);
         let corner = (8 * dpi as i32 / 96).max(2);
         RoundRect(
@@ -1233,20 +1547,18 @@ pub(super) unsafe fn paint_button(item: &DRAWITEMSTRUCT, selected: bool) {
         SelectObject(item.hDC, old_brush);
         DeleteObject(pen);
         SetBkMode(item.hDC, TRANSPARENT as i32);
-        SetTextColor(item.hDC, if disabled { muted() } else { ink() });
+        SetTextColor(item.hDC, if disabled || (navigation && !selected) { muted() } else { ink() });
         let button_font = SendMessageW(item.hwndItem, WM_GETFONT, 0, 0) as HFONT;
         if !button_font.is_null() {
             SelectObject(item.hDC, button_font);
         }
         let label = wide(&get_text(item.hwndItem));
         let mut rect = item.rcItem;
-        let main_navigation =
-            item.CtlID >= ID_NAV as u32 && item.CtlID < ID_NAV as u32 + Page::ALL.len() as u32;
         let action_card = !GetPropW(item.hwndItem, wide("Jiks.ActionCard").as_ptr()).is_null();
         if navigation {
             if selected {
                 let width = (3 * dpi as i32 / 96).max(2);
-                let margin = (10 * dpi as i32 / 96).max(4);
+                let margin = ((rect.bottom - rect.top) - 24 * dpi as i32 / 96).max(4) / 2;
                 fill(
                     item.hDC,
                     &RECT {
@@ -1259,8 +1571,20 @@ pub(super) unsafe fn paint_button(item: &DRAWITEMSTRUCT, selected: bool) {
                 );
             }
             if main_navigation {
+                if selected || item.CtlID == ID_NAV as u32 + 7 {
+                    SetTextColor(item.hDC, accent());
+                }
                 paint_nav_icon(item, item.CtlID - ID_NAV as u32);
-                rect.top += 25 * dpi as i32 / 96;
+                if selected {
+                    if item.itemState & ODS_FOCUS != 0 {
+                        InflateRect(&mut rect, -4, -4);
+                        DrawFocusRect(item.hDC, &rect);
+                    }
+                    RestoreDC(item.hDC, saved_dc);
+                    return;
+                }
+                SetTextColor(item.hDC, muted());
+                rect.top += 29 * dpi as i32 / 96;
             } else {
                 // Categories retain the old settings sidebar's icon + title.
                 paint_nav_icon(
@@ -1301,6 +1625,51 @@ pub(super) unsafe fn paint_button(item: &DRAWITEMSTRUCT, selected: bool) {
             DrawFocusRect(item.hDC, &rect);
         }
         RestoreDC(item.hDC, saved_dc);
+    }
+}
+
+unsafe fn paint_caption_tool(item: &DRAWITEMSTRUCT) {
+    unsafe {
+        let dc = item.hDC;
+        let saved = SaveDC(dc);
+        let mut rect = item.rcItem;
+        let enabled = item.itemState & ODS_DISABLED == 0;
+        let active = enabled && (item.itemState & ODS_SELECTED != 0
+            || !GetPropW(item.hwndItem, windows_sys::w!("Jiks.Button.Hover")).is_null());
+        let background = if active { PALETTE.with(|palette| palette.get().pressed) } else { paper() };
+        let color = if enabled { ink() } else { muted() };
+        fill(dc, &rect, paper());
+        SelectObject(dc, GetStockObject(DC_PEN));
+        SelectObject(dc, GetStockObject(DC_BRUSH));
+        SetDCPenColor(dc, line());
+        SetDCBrushColor(dc, background);
+        let dpi = GetDpiForWindow(item.hwndItem).max(96) as i32;
+        let rounding = (6 * dpi / 96).max(2);
+        RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, rounding, rounding);
+        if item.CtlID == ID_THEME as u32 {
+            let diameter = 13 * dpi / 96;
+            let left = (rect.left + rect.right - diameter) / 2;
+            let top = (rect.top + rect.bottom - diameter) / 2;
+            let middle = top + diameter / 2;
+            let right = left + diameter;
+            let bottom = top + diameter;
+            SetDCPenColor(dc, color);
+            Ellipse(dc, left, top, right, bottom);
+            SetDCBrushColor(dc, color);
+            Chord(dc, left, top, right, bottom, left, middle, right, middle);
+        } else {
+            SetBkMode(dc, TRANSPARENT as i32);
+            SetTextColor(dc, color);
+            let font = SendMessageW(item.hwndItem, WM_GETFONT, 0, 0) as HFONT;
+            if !font.is_null() { SelectObject(dc, font); }
+            DrawTextW(dc, wide(&get_text(item.hwndItem)).as_ptr(), -1, &mut rect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        }
+        if item.itemState & ODS_FOCUS != 0 {
+            InflateRect(&mut rect, -3, -3);
+            DrawFocusRect(dc, &rect);
+        }
+        RestoreDC(dc, saved);
     }
 }
 pub(super) unsafe fn paint_primary_button(item: &DRAWITEMSTRUCT) {
@@ -1359,6 +1728,7 @@ unsafe fn paint_nav_icon(item: &DRAWITEMSTRUCT, index: u32) {
         let unit = (2 * dpi / 96).max(1);
         let stacked =
             item.CtlID >= ID_NAV as u32 && item.CtlID < ID_NAV as u32 + Page::ALL.len() as u32;
+        let selected = stacked && !GetPropW(item.hwndItem, windows_sys::w!("Jiks.Selected")).is_null();
         let x = item.rcItem.left
             + if stacked {
                 (item.rcItem.right - item.rcItem.left - 9 * unit) / 2
@@ -1366,8 +1736,8 @@ unsafe fn paint_nav_icon(item: &DRAWITEMSTRUCT, index: u32) {
                 10 * dpi / 96
             };
         let y = item.rcItem.top
-            + if stacked {
-                7 * dpi / 96
+            + if stacked && !selected {
+                12 * dpi / 96
             } else {
                 (h - 9 * unit) / 2
             };
@@ -1381,11 +1751,19 @@ unsafe fn paint_nav_icon(item: &DRAWITEMSTRUCT, index: u32) {
         match index {
             0 => {
                 let pts = [p(0, 3), p(4, 0), p(8, 3), p(8, 8), p(0, 8), p(0, 3)];
-                Polyline(item.hDC, pts.as_ptr(), pts.len() as i32);
-                MoveToEx(item.hDC, x + 3 * unit, y + 8 * unit, null_mut());
-                LineTo(item.hDC, x + 3 * unit, y + 5 * unit);
-                LineTo(item.hDC, x + 5 * unit, y + 5 * unit);
-                LineTo(item.hDC, x + 5 * unit, y + 8 * unit);
+                if selected {
+                    SelectObject(item.hDC, GetStockObject(DC_BRUSH));
+                    SetDCBrushColor(item.hDC, GetTextColor(item.hDC));
+                    Polygon(item.hDC, pts.as_ptr(), pts.len() as i32);
+                    let door = RECT { left: x + 3 * unit, top: y + 5 * unit, right: x + 5 * unit, bottom: y + 9 * unit };
+                    fill(item.hDC, &door, surface());
+                } else {
+                    Polyline(item.hDC, pts.as_ptr(), pts.len() as i32);
+                    MoveToEx(item.hDC, x + 3 * unit, y + 8 * unit, null_mut());
+                    LineTo(item.hDC, x + 3 * unit, y + 5 * unit);
+                    LineTo(item.hDC, x + 5 * unit, y + 5 * unit);
+                    LineTo(item.hDC, x + 5 * unit, y + 8 * unit);
+                }
             }
             1 => {
                 Rectangle(item.hDC, x, y + unit, x + 9 * unit, y + 7 * unit);
@@ -1479,6 +1857,42 @@ unsafe fn paint_nav_icon(item: &DRAWITEMSTRUCT, index: u32) {
                     p(4, 2),
                 ];
                 Polyline(item.hDC, pts.as_ptr(), pts.len() as i32);
+            }
+            9 => {
+                Ellipse(item.hDC, x, y, x + 9 * unit, y + 9 * unit);
+                let from = p(4, 5);
+                let to = p(7, 2);
+                MoveToEx(item.hDC, from.x, from.y, null_mut());
+                LineTo(item.hDC, to.x, to.y);
+            }
+            10 => {
+                let outer = [p(3, 0), p(6, 1), p(8, 4), p(8, 6), p(6, 8), p(3, 9), p(0, 8)];
+                let inner = [p(0, 8), p(3, 6), p(4, 3), p(3, 0)];
+                Polyline(item.hDC, outer.as_ptr(), outer.len() as i32);
+                Polyline(item.hDC, inner.as_ptr(), inner.len() as i32);
+            }
+            11 => {
+                let leaf = [p(4, 0), p(7, 2), p(8, 5), p(7, 7), p(4, 8), p(1, 6), p(1, 4), p(4, 0)];
+                Polyline(item.hDC, leaf.as_ptr(), leaf.len() as i32);
+                let start = p(4, 5);
+                let end = p(4, 10);
+                MoveToEx(item.hDC, start.x, start.y, null_mut());
+                LineTo(item.hDC, end.x, end.y);
+            }
+            12 => {
+                Rectangle(item.hDC, x + unit, y + unit, x + 8 * unit, y + 8 * unit);
+                Rectangle(item.hDC, x + 3 * unit, y + 3 * unit, x + 6 * unit, y + 6 * unit);
+                for a in [2, 4, 6] {
+                    for (from, to) in [(p(a, 0), p(a, 1)), (p(a, 8), p(a, 9)),
+                        (p(0, a), p(1, a)), (p(8, a), p(9, a))] {
+                        MoveToEx(item.hDC, from.x, from.y, null_mut());
+                        LineTo(item.hDC, to.x, to.y);
+                    }
+                }
+            }
+            13 => {
+                Rectangle(item.hDC, x + 2 * unit, y + 3 * unit, x + 7 * unit, y + 9 * unit);
+                Rectangle(item.hDC, x + 3 * unit, y, x + 6 * unit, y + 3 * unit);
             }
             _ => {
                 Ellipse(item.hDC, x, y, x + 9 * unit, y + 9 * unit);
@@ -1620,6 +2034,7 @@ struct App {
     body_font: HFONT,
     heading_font: HFONT,
     title_font: HFONT,
+    caption_font: HFONT,
     brush: HBRUSH,
     surface_brush: HBRUSH,
     fixed: Vec<HWND>,
@@ -1630,11 +2045,13 @@ struct App {
     drafts: BTreeMap<String, Value>,
     dirty: BTreeSet<String>,
     metrics: Vec<MetricPlacement>,
+    observed_metric_keys: BTreeSet<String>,
+    dashboard_structure: Option<DashboardStructure>,
+    pending_process_options: Option<Vec<UiChoice>>,
     cards: Vec<CardSurface>,
     surface_children: BTreeSet<usize>,
     muted_labels: BTreeSet<usize>,
-    title: HWND,
-    machine: HWND,
+    caption: HWND,
     notice: HWND,
     rendered_revision: u64,
     metadata_revision: u64,
@@ -1643,12 +2060,14 @@ struct App {
     scrolling: Scrolling,
     content_height: i32,
     pending: BTreeMap<u64, bool>,
+    direct_pending: BTreeMap<u64, String>,
     rendering: bool,
     layout_posted: bool,
     preview_theme: Option<&'static str>,
     feedback_until: Option<Instant>,
     tray: bool,
     tray_data: NOTIFYICONDATAW,
+    tray_hover_at: Option<Instant>,
     taskbar_message: u32,
     show_message: u32,
     popup: super::status_popup::StatusPopup,
@@ -1736,6 +2155,7 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
             body_font: null_mut(),
             heading_font: null_mut(),
             title_font: null_mut(),
+            caption_font: null_mut(),
             brush,
             surface_brush: CreateSolidBrush(surface()),
             fixed: vec![],
@@ -1746,11 +2166,13 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
             drafts: BTreeMap::new(),
             dirty: BTreeSet::new(),
             metrics: vec![],
+            observed_metric_keys: BTreeSet::new(),
+            dashboard_structure: None,
+            pending_process_options: None,
             cards: vec![],
             surface_children: BTreeSet::new(),
             muted_labels: BTreeSet::new(),
-            title: null_mut(),
-            machine: null_mut(),
+            caption: null_mut(),
             notice: null_mut(),
             rendered_revision: u64::MAX,
             metadata_revision: u64::MAX,
@@ -1759,12 +2181,14 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
             scrolling: Scrolling::default(),
             content_height: 0,
             pending: BTreeMap::new(),
+            direct_pending: BTreeMap::new(),
             rendering: false,
             layout_posted: false,
             preview_theme: None,
             feedback_until: None,
             tray: false,
             tray_data: zeroed(),
+            tray_hover_at: None,
             taskbar_message: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
             show_message: RegisterWindowMessageW(wide("Jiks.ShowExisting.1").as_ptr()),
             popup: super::status_popup::StatusPopup::default(),
@@ -1801,6 +2225,12 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
         if hwnd.is_null() {
             drop(Box::from_raw(raw));
             bail!("无法创建拯救者工具箱窗口：{}", GetLastError());
+        }
+        if extend_main_caption(hwnd, GetDpiForWindow(hwnd).max(96))
+            && SetPropW(hwnd, CAPTION_PROPERTY, 1usize as HANDLE) != 0
+        {
+            SetWindowPos(hwnd, null_mut(), 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         }
         a11y::annotate(hwnd, "main", None, None);
         let instance_key = (*raw).borrow().bridge.instance_key.clone();
@@ -1908,6 +2338,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
         let raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut RefCell<App>;
         if raw.is_null() {
             return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+        if let Some(result) = main_caption_message(hwnd, msg, wp, lp) {
+            return result;
         }
         if let Some(result) = presentation_message(msg, wp, lp) {
             return result;
@@ -2058,6 +2491,7 @@ unsafe fn dispatch_window(app: &mut App, msg: u32, wp: usize, lp: isize) -> Opti
     }
     unsafe {
         if msg == app.taskbar_message && msg != 0 {
+            app.cancel_tray_hover();
             app.add_tray();
             return Some(0);
         }
@@ -2126,6 +2560,9 @@ unsafe fn dispatch_window(app: &mut App, msg: u32, wp: usize, lp: isize) -> Opti
             WM_DPICHANGED => {
                 app.capture();
                 app.dpi = (wp & 0xffff) as u32;
+                if !GetPropW(app.hwnd, CAPTION_PROPERTY).is_null() {
+                    extend_main_caption(app.hwnd, app.dpi);
+                }
                 let rect = &*(lp as *const RECT);
                 SetWindowPos(
                     app.hwnd,
@@ -2218,6 +2655,15 @@ unsafe fn dispatch_window(app: &mut App, msg: u32, wp: usize, lp: isize) -> Opti
             WM_PAINT => {
                 let mut ps: PAINTSTRUCT = zeroed();
                 let dc = BeginPaint(app.hwnd, &mut ps);
+                if ps.rcPaint.left == 0 && ps.rcPaint.top == 0 {
+                    let mut client: RECT = zeroed();
+                    if GetClientRect(app.hwnd, &mut client) != 0
+                        && ps.rcPaint.right == client.right && ps.rcPaint.bottom == client.bottom
+                        && client.right > 0 && client.bottom > 0
+                    {
+                        app.bridge.diagnostics.main_full_paints.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
                 #[cfg(debug_assertions)]
                 super::scroll_trace::record("paint-start", app.scroll as i64, (ps.rcPaint.bottom - ps.rcPaint.top) as i64);
                 app.paint_client(dc);
@@ -2234,9 +2680,20 @@ unsafe fn dispatch_window(app: &mut App, msg: u32, wp: usize, lp: isize) -> Opti
                 match (lp as u32) & 0xffff {
                     WM_LBUTTONUP | NIN_SELECT | TRAY_KEY_SELECT => app.foreground(),
                     WM_RBUTTONUP | WM_CONTEXTMENU => app.tray_menu(),
-                    NIN_POPUPOPEN => app.show_status_popup(false),
-                    NIN_POPUPCLOSE => app.popup.schedule_hide(),
+                    NIN_POPUPOPEN if app.tray && !app.popup.is_visible() => {
+                        app.tray_hover_at = Some(Instant::now() + TRAY_HOVER_DELAY);
+                        SetTimer(app.hwnd, TRAY_HOVER_TIMER, TRAY_HOVER_DELAY.as_millis() as u32, None);
+                    }
+                    NIN_POPUPCLOSE => app.cancel_tray_hover(),
                     _ => {}
+                }
+                Some(0)
+            }
+            WM_TIMER if wp == TRAY_HOVER_TIMER => {
+                if app.tray_hover_at.is_some_and(|due| Instant::now() >= due) {
+                    app.tray_hover_at = None;
+                    KillTimer(app.hwnd, TRAY_HOVER_TIMER);
+                    app.show_status_popup(false);
                 }
                 Some(0)
             }
@@ -2300,7 +2757,7 @@ unsafe fn dispatch_window(app: &mut App, msg: u32, wp: usize, lp: isize) -> Opti
 impl Drop for App {
     fn drop(&mut self) {
         unsafe {
-            for font in [self.body_font, self.heading_font, self.title_font] {
+            for font in [self.body_font, self.heading_font, self.title_font, self.caption_font] {
                 if !font.is_null() {
                     DeleteObject(font);
                 }
@@ -2337,14 +2794,15 @@ impl App {
     }
     unsafe fn make_fonts(&mut self) {
         unsafe {
-            for f in [self.body_font, self.heading_font, self.title_font] {
+            for f in [self.body_font, self.heading_font, self.title_font, self.caption_font] {
                 if !f.is_null() {
                     DeleteObject(f);
                 }
             }
             self.body_font = font(self.dpi, 14, false);
             self.heading_font = font(self.dpi, 17, true);
-            self.title_font = font(self.dpi, 26, true);
+            self.title_font = font(self.dpi, 22, true);
+            self.caption_font = font(self.dpi, 12, false);
         }
     }
     unsafe fn build_fixed(&mut self) {
@@ -2353,31 +2811,14 @@ impl App {
             for h in self.fixed.drain(..) {
                 DestroyWindow(h);
             }
-            let brand = create(
-                self.hwnd,
-                "STATIC",
-                "",
-                SS_ICON | SS_CENTERIMAGE,
-                0,
-                [self.s(10), self.s(14), self.s(76), self.s(62)],
-                self.heading_font,
-            );
-            SendMessageW(brand, STM_SETICON, app_icon() as usize, 0);
-            self.fixed.push(brand);
-            a11y::annotate(brand, "main.brand", Some("拯救者工具箱"), None);
-            for (index, page) in Page::ALL.iter().enumerate() {
+            for (index, page) in main_nav() {
                 let h = create(
                     self.hwnd,
                     "BUTTON",
                     page.title(),
                     BS_OWNERDRAW as u32 | WS_TABSTOP,
                     ID_NAV + index as u16,
-                    [
-                        self.s(10),
-                        self.s(VIEW_TOP + index as i32 * 49),
-                        self.s(76),
-                        self.s(46),
-                    ],
+                    [0, 0, 0, 0],
                     self.body_font,
                 );
                 self.fixed.push(h);
@@ -2397,7 +2838,7 @@ impl App {
                 [0, 0, 0, 0],
                 self.body_font,
             );
-            for page in Page::ALL {
+            for (_, page) in main_nav() {
                 SendMessageW(nav, LB_ADDSTRING, 0, wide(page.title()).as_ptr() as isize);
             }
             SendMessageW(nav, LB_SETITEMHEIGHT, 0, self.s(34) as isize);
@@ -2408,54 +2849,40 @@ impl App {
                 Some(&super::i18n::tr("主导航")),
                 None,
             );
-            let exit = create(
-                self.hwnd,
-                "BUTTON",
-                &super::i18n::tr("退出"),
-                BS_OWNERDRAW as u32 | WS_TABSTOP,
-                ID_EXIT,
-                [0, 0, 0, 0],
-                self.body_font,
-            );
-            self.fixed.push(exit);
-            a11y::annotate(exit, "main.exit", None, None);
-            for (id, label) in [(ID_DEVICE, "设备信息"), (ID_LOG, "日志"), (ID_THEME, "切换主题")] {
+            let model = live_snapshot(&self.bridge);
+            for (id, name, label) in [
+                (ID_DEVICE, "main.device-information", "设备信息"),
+                (ID_THEME, "main.theme", "切换主题"),
+            ] {
+                let caption = if id == ID_DEVICE {
+                    device_badge(&model)
+                } else {
+                    super::i18n::tr(label).into_owned()
+                };
                 let h = create(
                     self.hwnd,
                     "BUTTON",
-                    &super::i18n::tr(label),
+                    &caption,
                     BS_OWNERDRAW as u32 | WS_TABSTOP,
                     id,
                     [0, 0, 0, 0],
                     self.body_font,
                 );
                 self.fixed.push(h);
-                a11y::annotate(
-                    h,
-                    match id {
-                        ID_DEVICE => "main.device-information",
-                        ID_LOG => "main.logs",
-                        _ => "main.theme",
-                    },
-                    Some(&super::i18n::tr(label)),
-                    None,
-                );
+                presentation_flag(h, "Jiks.CaptionTool", true);
+                a11y::annotate(h, name, Some(&super::i18n::tr(label)), None);
             }
-            self.title = create(
+            self.caption = create(
                 self.hwnd,
                 "STATIC",
-                self.page.title(),
-                SS_CENTERIMAGE | SS_NOPREFIX,
+                "拯救者工具箱",
+                SS_CENTERIMAGE | SS_ENDELLIPSIS | SS_NOPREFIX,
                 0,
                 [0, 0, 0, 0],
-                self.title_font,
+                self.caption_font,
             );
-            self.fixed.push(self.title);
-            a11y::annotate(self.title, "main.page-title", None, None);
-            self.machine = create(self.hwnd, "STATIC", "", SS_CENTERIMAGE | SS_ENDELLIPSIS | SS_NOPREFIX, 0, [0, 0, 0, 0], self.body_font);
-            self.fixed.push(self.machine);
-            a11y::annotate(self.machine, "main.machine", None, None);
-            presentation_flag(self.machine, "Jiks.Muted", true);
+            self.fixed.push(self.caption);
+            a11y::annotate(self.caption, "main.caption", None, None);
             self.notice = create(
                 self.hwnd,
                 "STATIC",
@@ -2477,43 +2904,38 @@ impl App {
             let (w, h) = self.size();
             // A short client area uses one native scrolling navigation list.
             // Main and footer items never occupy the same row.
-            let nav_bottom = h - FOOTER_HEIGHT - 5;
+            let nav_bottom = h - 12;
             let nav_space = nav_bottom - VIEW_TOP;
-            let nav_step = ((nav_space - 12) / Page::ALL.len() as i32).clamp(39, 54);
-            let compact_nav = nav_space < Page::ALL.len() as i32 * 39 + 12;
+            let nav_count = main_nav().count() as i32;
+            let nav_step = ((nav_space - 12) / nav_count).clamp(39, 64);
+            let compact_nav = nav_space < nav_count * 39 + 12;
+            let active_page = active_navigation(self.page);
             let nav = GetDlgItem(self.hwnd, ID_NAV_LIST as i32);
             SetWindowPos(
                 nav,
                 null_mut(),
-                self.s(10),
+                self.s(12),
                 self.s(VIEW_TOP),
-                self.s(76),
-                self.s((h - VIEW_TOP - FOOTER_HEIGHT - 8).max(76)),
+                self.s(60),
+                self.s(nav_space.max(60)),
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
             SendMessageW(
                 nav,
                 LB_SETCURSEL,
-                Page::ALL.iter().position(|p| *p == self.page).unwrap_or(0),
+                main_nav().position(|(_, page)| page == active_page).unwrap_or(0),
                 0,
             );
             ShowWindow(nav, if compact_nav { SW_SHOWNA } else { SW_HIDE });
-            for index in 0..Page::ALL.len() {
-                ShowWindow(
-                    GetDlgItem(self.hwnd, ID_NAV as i32 + index as i32),
-                    if compact_nav { SW_HIDE } else { SW_SHOWNA },
-                );
-                let page = Page::ALL[index];
+            for (position, (index, page)) in main_nav().enumerate() {
                 let control = GetDlgItem(self.hwnd, ID_NAV as i32 + index as i32);
-                let y = if index < 6 { VIEW_TOP + index as i32 * nav_step }
-                    else { nav_bottom - (Page::ALL.len() - index) as i32 * nav_step };
-                SetWindowPos(control, null_mut(), self.s(10), self.s(y), self.s(76), self.s(nav_step - 3), SWP_NOZORDER | SWP_NOACTIVATE);
-                let selected = page == self.page || (page == Page::Dashboard && matches!(self.page, Page::Performance | Page::Display | Page::Graphics));
-                if selected {
-                    presentation_flag(control, "Jiks.Selected", true);
-                } else {
-                    presentation_flag(control, "Jiks.Selected", false);
-                }
+                ShowWindow(control, if compact_nav { SW_HIDE } else { SW_SHOWNA });
+                let position = position as i32;
+                let y = if index < 6 { VIEW_TOP + position * nav_step }
+                    else { nav_bottom - (nav_count - position) * nav_step };
+                SetWindowPos(control, null_mut(), self.s(12), self.s(y), self.s(60), self.s(nav_step - 4), SWP_NOZORDER | SWP_NOACTIVATE);
+                let selected = page == active_page;
+                presentation_flag(control, "Jiks.Selected", selected);
                 InvalidateRect(control, null(), 0);
                 a11y::annotate(
                     GetDlgItem(self.hwnd, ID_NAV as i32 + index as i32),
@@ -2523,15 +2945,16 @@ impl App {
                 );
             }
             let right = w - CONTENT_RIGHT;
-            let toolbar_x = right - 278;
+            let integrated = !GetPropW(self.hwnd, CAPTION_PROPERTY).is_null();
+            let caption_right = w - if integrated { caption_reserved_width(self.hwnd, self.dpi) } else { 12 };
+            let theme_x = caption_right - 32;
+            let device_x = theme_x - 163;
+            ShowWindow(self.caption, if integrated { SW_SHOWNA } else { SW_HIDE });
             for (hwnd, x, y, width, height) in [
-                (GetDlgItem(self.hwnd, ID_EXIT as i32), 10, h - 39, 76, 30),
-                (self.title, CONTENT_X, 14, toolbar_x - CONTENT_X - 14, 38),
-                (GetDlgItem(self.hwnd, ID_DEVICE as i32), toolbar_x, 18, 106, 34),
-                (GetDlgItem(self.hwnd, ID_LOG as i32), toolbar_x + 114, 18, 62, 34),
-                (GetDlgItem(self.hwnd, ID_THEME as i32), toolbar_x + 184, 18, 94, 34),
-                (self.machine, CONTENT_X, 57, right - CONTENT_X, 25),
-                (self.notice, CONTENT_X, h - FOOTER_HEIGHT + 6, right - CONTENT_X, 34),
+                (self.caption, 12, 0, device_x - 24, CAPTION_HEIGHT),
+                (GetDlgItem(self.hwnd, ID_DEVICE as i32), device_x, 2, 160, 26),
+                (GetDlgItem(self.hwnd, ID_THEME as i32), theme_x, 2, 32, 26),
+                (self.notice, CONTENT_X, h - FOOTER_HEIGHT + 5, right - CONTENT_X, 26),
             ] {
                 SetWindowPos(
                     hwnd,
@@ -2543,7 +2966,6 @@ impl App {
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 );
             }
-            text(self.title, self.page.title());
         }
     }
     unsafe fn placed(
@@ -2706,22 +3128,32 @@ impl App {
     unsafe fn metric(&mut self, metric: &UiMetric, y: i32, width: i32, compact: bool) {
         unsafe {
             let origin = self.column_x;
-            let value_width = (width * 42 / 100).clamp(70, 140);
+            let dashboard = self.page == Page::Dashboard;
+            let meter = if dashboard && width >= 170 { metric_meter_scale(&metric.key) } else { 0 };
+            let row_height = if dashboard { 22 } else { 26 };
+            let value_width = if meter != 0 { (width * 56 / 100).clamp(98, 140) }
+                else { (width * 46 / 100).clamp(70, 140) };
             let detail_width = if compact { 0 } else { (width / 4).clamp(64, 180) + 8 };
             let name_width = (width - value_width - detail_width - 8).max(24);
             let name = self.placed(
                 "STATIC", metric_caption(metric, compact), SS_CENTERIMAGE | SS_ENDELLIPSIS | SS_NOPREFIX,
-                0, [origin, y, name_width, 26], self.body_font,
+                0, [origin, y, name_width, row_height], self.body_font,
             );
+            if dashboard {
+                presentation_flag(name, "Jiks.Muted", true);
+            }
             self.column_x = origin + name_width + 8;
             let value = self.placed(
                 "STATIC",
                 &metric.value,
                 SS_RIGHT | SS_CENTERIMAGE | SS_ENDELLIPSIS | SS_NOPREFIX,
                 0,
-                [self.column_x, y, value_width, 26],
+                [self.column_x, y, value_width, row_height],
                 self.body_font,
             );
+            if meter != 0 {
+                SetWindowSubclass(value, Some(metric_meter_paint), METRIC_METER, meter);
+            }
             let scope = self.accessibility_scope();
             let detail = if compact {
                 null_mut()
@@ -2786,8 +3218,7 @@ impl App {
                     presentation_flag(h, "Jiks.Primary", true);
                     primary_used = true;
                 }
-                let unavailable = (!action.capability.is_empty() && !model.can(action.capability))
-                    .then(|| model.unavailable_reason(action.capability));
+                let unavailable = action_disabled_reason(model, &action);
                 a11y::annotate(h, &a11y::key(scope, "action", &action_key(&action)), None, unavailable.as_deref());
                 if unavailable.is_some() {
                     EnableWindow(h, 0);
@@ -2821,6 +3252,7 @@ impl App {
             self.buttons.clear();
             self.pickers.clear();
             self.metrics.clear();
+            self.pending_process_options = None;
             self.cards.clear();
             self.surface_children.clear();
             self.muted_labels.clear();
@@ -2828,9 +3260,10 @@ impl App {
             self.rendered_revision = model.revision;
             self.metadata_revision = model.metadata_revision;
             self.backend_state = backend_state(&model);
+            self.observed_metric_keys = model.metrics.iter().map(|metric| metric.key.clone()).collect();
             let (w, _) = self.size();
             let width = (w - CONTENT_X - CONTENT_RIGHT).max(260);
-            let mut y = VIEW_TOP + 16;
+            let mut y = VIEW_TOP + 14;
             self.column_x = CONTENT_X;
             let measure_dc = GetDC(self.hwnd);
             let mut content_origin = CONTENT_X;
@@ -2863,23 +3296,43 @@ impl App {
             }
             if self.page == Page::Dashboard {
                 let groups = super::sensors::groups(&model);
-                let columns = if width >= 920 { 4 } else if width >= 444 { 2 } else { 1 };
-                let card_width = (width - (columns - 1) * 10) / columns;
+                let columns = ((width + 8) / 208).clamp(1, 4);
                 for row in groups.chunks(columns as usize) {
-                    let card_height = 48 + 26 * row.iter().map(|g| g.metrics.len()).max().unwrap_or(0) as i32;
+                    let row_columns = row.len() as i32;
+                    let card_width = (width - (row_columns - 1) * 8) / row_columns;
+                    let card_height = 44 + 22 * row.iter().map(|g| g.metrics.len()).max().unwrap_or(0) as i32;
                     for (column, group) in row.iter().enumerate() {
-                        let card_x = CONTENT_X + column as i32 * (card_width + 10);
+                        let card_x = CONTENT_X + column as i32 * (card_width + 8);
                         self.column_x = card_x + 12;
-                        let heading = self.label(&group.title, y + 10, card_width - 24, true, 27);
+                        let hardware_name = match group.title.as_str() {
+                            "CPU" => model.machine.splitn(3, " · ").nth(2),
+                            "GPU" => model.values.get("sensors.gpu.name").or_else(|| model.values.get("gpu.name"))
+                                .and_then(Value::as_str),
+                            _ => None,
+                        }.filter(|name| !name.trim().is_empty());
+                        let heading = self.placed(
+                            "STATIC", &group.title, SS_CENTERIMAGE | SS_ENDELLIPSIS | SS_NOPREFIX,
+                            0, [self.column_x, y + 8, if hardware_name.is_some() { 44 } else { card_width - 24 }, 24],
+                            self.heading_font,
+                        );
+                        if let Some(name) = hardware_name {
+                            let name = name.split(" @ ").next().unwrap_or(name)
+                                .replace("(R)", "").replace("(TM)", "");
+                            let label = self.placed(
+                                "STATIC", &name, SS_RIGHT | SS_CENTERIMAGE | SS_ENDELLIPSIS | SS_NOPREFIX,
+                                0, [card_x + 60, y + 8, card_width - 72, 24], self.body_font,
+                            );
+                            presentation_flag(label, "Jiks.Muted", true);
+                        }
                         if let Some(first) = group.metrics.first() {
                             a11y::annotate(heading, &a11y::key("main.dashboard", "group", &first.key), None, None);
                         }
                         for (index, metric) in group.metrics.iter().enumerate() {
-                            self.metric(metric, y + 35 + index as i32 * 26, card_width - 24, true);
+                            self.metric(metric, y + 34 + index as i32 * 22, card_width - 24, true);
                         }
                         self.cards.push(CardSurface { icon: None, rect: [card_x, y, card_width, card_height] });
                     }
-                    y += card_height + 12;
+                    y += card_height + 14;
                 }
                 self.column_x = CONTENT_X;
             } else if self.page == Page::Battery {
@@ -2934,6 +3387,8 @@ impl App {
                 y += 160;
             }
             let sections = catalog::sections(self.page, self.tools_tab, &model);
+            self.dashboard_structure =
+                (self.page == Page::Dashboard).then(|| DashboardStructure::new(&model, &sections));
             let mut next_field = 1000u16;
             let mut next_button = 2000u16;
             let two_columns = self.page == Page::Dashboard && width >= 830;
@@ -2964,8 +3419,12 @@ impl App {
                     .or_else(|| section.actions.first().map(action_key))
                     .unwrap_or_else(|| "content".into());
                 let section_scope = a11y::key(&self.accessibility_scope(), "section", &section_key);
-                let heading_height = self.measured_height(measure_dc, &section.title, width, self.heading_font).max(27);
-                let heading = self.label(&section.title, y, width, true, heading_height);
+                let heading_font = if self.page == Page::Dashboard { self.title_font } else { self.heading_font };
+                let heading_height = self.measured_height(measure_dc, &section.title, width, heading_font).max(27);
+                let heading = self.placed(
+                    "STATIC", &section.title, SS_CENTERIMAGE | SS_NOPREFIX, 0,
+                    [self.column_x, y, width, heading_height], heading_font,
+                );
                 self.surface_children.remove(&(heading as usize));
                 presentation_flag(heading, "Jiks.Surface", false);
                 a11y::annotate(
@@ -3004,6 +3463,10 @@ impl App {
                                 section.fields.iter().find(|f| f.key == "selection.gpu.processes").map(|f| f.key),
                             ActionKind::Execute { fields, .. } | ActionKind::Cancel(fields) =>
                                 section.fields.iter().rev().find(|f| fields.contains(&f.key)).map(|f| f.key),
+                            ActionKind::Navigate(Page::Graphics) =>
+                                section.fields.iter().find(|f| f.key == "gpu.dashboard_state").map(|f| f.key),
+                            ActionKind::Document("gpu_oc") =>
+                                section.fields.iter().find(|f| f.key == "gpu.oc.enabled").map(|f| f.key),
                             ActionKind::Structured { collection: "presets", .. } =>
                                 section.fields.iter().find(|f| f.key == "selection.presets").map(|f| f.key),
                             _ => None,
@@ -3018,11 +3481,16 @@ impl App {
                 for spec in section.fields {
                     let row_top = y;
                     let mut row = RowColumns::new(card_x, width + 32, matches!(spec.kind, FieldKind::Toggle));
-                    let value = self.drafts.get(spec.key).cloned().unwrap_or_else(|| model.value(spec.key));
-                    let options = field_options(&model, &spec);
-                    let editable = field_available(&model, spec.key, spec.capability)
+                    let value = self.drafts.get(spec.key).cloned().unwrap_or_else(|| field_value(&model, spec.key));
+                    let process_selector = self.page == Page::Dashboard && spec.key == GPU_PROCESS_SELECTOR;
+                    let options = if process_selector {
+                        Some(gpu_process_choices(&model))
+                    } else {
+                        field_options(&model, &spec)
+                    };
+                    let editable = process_selector || (field_available(&model, spec.key, spec.capability)
                         && !matches!(spec.kind, FieldKind::ReadOnly)
-                        && options.as_ref().is_none_or(|items| !items.is_empty());
+                        && options.as_ref().is_none_or(|items| !items.is_empty()));
                     let show_list = editable && matches!(spec.kind, FieldKind::Collection("automation" | "macros" | "packages"));
                     let control_height = if show_list {
                         row.label_width = card_x + width + 18 - row.label_x;
@@ -3105,6 +3573,9 @@ impl App {
                             .max().unwrap_or(editor_width).clamp(editor_width, editor_width.max(360));
                         SendMessageW(h, CB_SETDROPPEDWIDTH, self.s(drop_width) as usize, 0);
                         set_choices(h, &options, &value);
+                        if process_selector && options.len() == 1 {
+                            EnableWindow(h, 0);
+                        }
                         (h, BindingKind::Choice(options))
                         }
                     } else if matches!(spec.kind, FieldKind::Toggle) {
@@ -3118,12 +3589,7 @@ impl App {
                         let kind = if matches!(spec.kind, FieldKind::Number) { BindingKind::Number } else { BindingKind::Text };
                         (h, kind)
                     };
-                    let help = model.capabilities.get(spec.key)
-                        .filter(|cap| !cap.available)
-                        .map(|cap| cap.reason.clone())
-                        .or_else(|| (!spec.capability.is_empty() && !model.can(spec.capability))
-                            .then(|| model.unavailable_reason(spec.capability)))
-                        .filter(|reason| !reason.is_empty());
+                    let help = field_help(&model, &spec);
                     a11y::annotate(hwnd, &a11y::key(&scope, "field", spec.key), Some(spec.label), help.as_deref());
                     self.bindings.push(Binding {
                         key: spec.key.into(),
@@ -3145,15 +3611,20 @@ impl App {
                         );
                         self.pickers.insert(picker_id, (spec.key.into(), kind));
                     }
+                    let mut card_bottom = row_top + row_height;
+                    self.column_x = card_x + 16;
+                    if let Some(actions) = attached_actions.remove(spec.key) {
+                        let inner_right = card_x + width + 18;
+                        card_bottom = self.render_actions(
+                            actions, &section_scope, &mut next_button, measure_dc,
+                            [row.label_x, card_bottom - pad + 4, inner_right - row.label_x], &model,
+                        );
+                    }
                     self.cards.push(CardSurface {
-                        rect: [card_x, row_top, width + 32, row_height],
+                        rect: [card_x, row_top, width + 32, card_bottom - row_top],
                         icon: Some(super::presentation::field_icon(spec.key)),
                     });
-                    self.column_x = card_x + 16;
-                    y = row_top + row_height + 8;
-                    if let Some(actions) = attached_actions.remove(spec.key) {
-                        y = self.render_actions(actions, &section_scope, &mut next_button, measure_dc, [card_x, y, width + 32], &model);
-                    }
+                    y = card_bottom + 8;
                 }
                 y = self.render_actions(remaining_actions, &section_scope, &mut next_button, measure_dc, [card_x, y, width + 32], &model) + GROUP_GAP;
                 if two_columns {
@@ -3171,17 +3642,10 @@ impl App {
             self.rendering = false;
             self.apply_preferences(&model);
             self.overlay.sync(&model);
-            for (id, command) in [
-                (ID_DEVICE, "device.details"),
-                (ID_LOG, "tools.open_logs"),
-                (ID_THEME, "app.preferences.save"),
-            ] {
+            for (id, command) in MAIN_TOOLBAR {
                 EnableWindow(GetDlgItem(self.hwnd, id as i32), toolbar_available(&model, id, command) as i32);
             }
-            text(
-                self.machine,
-                &format!("{}  ·  {}", model.machine, model.version),
-            );
+            text_if_changed(GetDlgItem(self.hwnd, ID_DEVICE as i32), &device_badge(&model));
             if self.feedback_until.is_none() || get_text(self.notice).is_empty() {
                 text(self.notice, a11y::diagnostic().as_deref().unwrap_or_else(|| status_caption(&model)));
             }
@@ -3245,9 +3709,9 @@ impl App {
                     0,
                     0,
                 );
-                if let Some(page) = Page::ALL.get(index.max(0) as usize) {
+                if let Some((_, page)) = main_nav().nth(index as usize) {
                     self.capture();
-                    self.page = *page;
+                    self.page = page;
                     self.scrolling.cancel(self.hwnd);
                     self.scroll = 0;
                     self.render();
@@ -3262,46 +3726,26 @@ impl App {
                 self.render();
                 return;
             }
-            if id == ID_EXIT {
-                self.bridge
-                    .diagnostics
-                    .main_exit_invocations
-                    .fetch_add(1, Ordering::Relaxed);
-                self.bridge
-                    .diagnostics
-                    .last_exit_origin
-                    .store(2, Ordering::Relaxed);
-                self.shutdown();
-                return;
-            }
-            if [ID_DEVICE, ID_LOG, ID_THEME].contains(&id) {
+            if matches!(id, ID_DEVICE | ID_THEME) {
                 if id == ID_DEVICE {
                     self.modal_active = true;
                     self.deferred_editor = Some(DeferredEditor::DeviceInformation);
                     return;
                 }
                 let model = live_snapshot(&self.bridge);
-                if id == ID_THEME && model.value("backend.read_only").as_bool() == Some(true) {
+                if model.value("backend.read_only").as_bool() == Some(true) {
                     self.preview_theme = Some(if paper() & 0xff < 128 { "light" } else { "dark" });
                     self.sync_palette(&model);
                     return;
                 }
-                let command = if id == ID_LOG {
-                    "tools.open_logs"
-                } else {
-                    "app.preferences.save"
-                };
-                let payload = if id == ID_THEME {
-                    let theme = model
-                        .values
-                        .get("appearance.effective_theme")
-                        .or_else(|| model.values.get("appearance.theme"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("light");
-                    json!({"appearance.theme":if theme.eq_ignore_ascii_case("dark"){"light"}else{"dark"}})
-                } else {
-                    json!({})
-                };
+                let command = "app.preferences.save";
+                let theme = model
+                    .values
+                    .get("appearance.effective_theme")
+                    .or_else(|| model.values.get("appearance.theme"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("light");
+                let payload = json!({"appearance.theme":if theme.eq_ignore_ascii_case("dark"){"light"}else{"dark"}});
                 if !model.can(command) {
                     message(
                         self.hwnd,
@@ -3356,6 +3800,21 @@ impl App {
                 .iter()
                 .find(|b| GetDlgCtrlID(b.hwnd) == id as i32)
             {
+                if self.page == Page::Dashboard && let Some(command) = dashboard_direct_command(&binding.key) {
+                    let committed = match binding.kind {
+                        BindingKind::Choice(_) => {
+                            notification == CBN_CLOSEUP as u16
+                                || (notification == CBN_SELCHANGE as u16
+                                    && SendMessageW(binding.hwnd, CB_GETDROPPEDSTATE, 0, 0) == 0)
+                        }
+                        BindingKind::Toggle => notification == BN_CLICKED as u16,
+                        _ => false,
+                    };
+                    if committed && IsWindowEnabled(binding.hwnd) != 0 {
+                        self.apply_dashboard_control(id, command);
+                    }
+                    return;
+                }
                 if notification == EN_CHANGE as u16
                     || notification == CBN_SELCHANGE as u16
                     || notification == BN_CLICKED as u16
@@ -3532,6 +3991,52 @@ impl App {
         }
     }
 
+    unsafe fn apply_dashboard_control(&mut self, id: u16, command: &str) {
+        unsafe {
+            let Some(binding) = self.bindings.iter().find(|binding| GetDlgCtrlID(binding.hwnd) == id as i32) else {
+                return;
+            };
+            let model = live_snapshot(&self.bridge);
+            let current = model.value(&binding.key);
+            if self.direct_pending.values().any(|key| key == &binding.key) {
+                set_binding(binding, self.drafts.get(&binding.key).unwrap_or(&current));
+                return;
+            }
+            let Ok(value) = read_binding(binding) else { return; };
+            if value.is_null() || choice_matches(&UiChoice::new("", value.clone()), &current) {
+                return;
+            }
+            if !model.can(command) {
+                set_binding(binding, &current);
+                text_if_changed(self.notice, &model.unavailable_reason(command));
+                self.feedback_until = Some(Instant::now() + Duration::from_secs(6));
+                return;
+            }
+            if command == "gpu.hybrid.apply"
+                && !confirm(self.hwnd, "应用所选显卡工作模式？若需要重启，后台将先返回说明。")
+            {
+                set_binding(binding, &current);
+                return;
+            }
+            let key = binding.key.clone();
+            let request = request_id();
+            let payload = json!({(key.clone()): value.clone()});
+            match send(&self.bridge, UiAction::Execute { request_id: request, command: command.into(), payload }) {
+                Ok(()) => {
+                    self.pending.insert(request, false);
+                    self.direct_pending.insert(request, key.clone());
+                    self.dirty.insert(key.clone());
+                    self.drafts.insert(key, value);
+                    text_if_changed(self.notice, super::i18n::tr_static("正在处理…"));
+                }
+                Err(error) => {
+                    set_binding(binding, &current);
+                    message(self.hwnd, "操作未完成", &error.to_string(), true);
+                }
+            }
+        }
+    }
+
     unsafe fn refresh(&mut self) {
         unsafe {
             if !self.smoke_submitted
@@ -3693,7 +4198,7 @@ impl App {
             let background_model = live_snapshot(&self.bridge);
             if self.feedback_until.is_some_and(|until| Instant::now() >= until) {
                 self.feedback_until = None;
-                if self.pending.is_empty() { text(self.notice, status_caption(&background_model)); }
+                if self.pending.is_empty() { text_if_changed(self.notice, status_caption(&background_model)); }
             }
             if !self.language_prompted
                 && self.bridge.startup_language_prompt
@@ -3757,6 +4262,7 @@ impl App {
                 })
                 .unwrap_or(false);
             if unchanged && self.pending.is_empty() {
+                self.sync_gpu_process_selector();
                 self.overlay.flush();
                 self.report_visibility();
                 return;
@@ -3773,23 +4279,22 @@ impl App {
                 SetTimer(self.hwnd, TIMER, desired, None);
             }
             self.sync_palette(&model);
-            for (id, command) in [
-                (ID_DEVICE, "device.details"),
-                (ID_LOG, "tools.open_logs"),
-                (ID_THEME, "app.preferences.save"),
-            ] {
-                EnableWindow(GetDlgItem(self.hwnd, id as i32), toolbar_available(&model, id, command) as i32);
+            for (id, command) in MAIN_TOOLBAR {
+                enable_if_changed(GetDlgItem(self.hwnd, id as i32), toolbar_available(&model, id, command));
             }
             if model.shutdown_ready {
                 self.deferred_destroy = true;
                 return;
             }
-            if (model.metadata_revision != self.metadata_revision || backend_state(&model) != self.backend_state)
-                && IsWindowVisible(self.hwnd) != 0
+            if IsWindowVisible(self.hwnd) != 0
+                && (backend_state(&model) != self.backend_state
+                    || self.has_changed_page_structure(&model)
+                    || self.has_new_metric_rows(&model))
             {
                 self.capture();
                 self.render();
             }
+            self.sync_gpu_process_selector();
             let mut completed = vec![];
             for (request, shutdown) in &self.pending {
                 if let Some(result) = model.result(*request) {
@@ -3804,29 +4309,32 @@ impl App {
             }
             for request in completed {
                 self.pending.remove(&request);
+                if let Some(key) = self.direct_pending.remove(&request) {
+                    self.drafts.remove(&key);
+                    self.dirty.remove(&key);
+                    if let Some(binding) = self.bindings.iter().find(|binding| binding.key == key) {
+                        set_binding(binding, &model.value(&key));
+                    }
+                }
             }
             if model.revision != self.rendered_revision {
                 self.rendering = true;
                 self.rendered_revision = model.revision;
-                text(
-                    self.machine,
-                    &format!("{}  ·  {}", model.machine, model.version),
-                );
+                text_if_changed(GetDlgItem(self.hwnd, ID_DEVICE as i32), &device_badge(&model));
                 if self.pending.is_empty() && self.feedback_until.is_none() {
-                    text(self.notice, status_caption(&model));
+                    text_if_changed(self.notice, status_caption(&model));
                 }
+                let mut changed_readings = 0;
                 for placed in &self.metrics {
                     if let Some(metric) = model.metrics.iter().find(|m| m.key == placed.key) {
-                        let mut changed = false;
+                        let value_changed = text_if_changed(placed.value, &metric.value);
+                        changed_readings += u64::from(value_changed);
+                        let mut changed = value_changed;
                         for (hwnd, value) in [
                             (placed.name, metric_caption(metric, placed.compact)),
-                            (placed.value, metric.value.as_str()),
                             (placed.detail, metric.detail.as_str()),
                         ] {
-                            if !hwnd.is_null() && get_text(hwnd) != value {
-                                text(hwnd, value);
-                                changed = true;
-                            }
+                            changed |= text_if_changed(hwnd, value);
                         }
                         if changed {
                             a11y::annotate(
@@ -3839,38 +4347,138 @@ impl App {
                                 Some(&metric.detail),
                             );
                         }
-                    }
-                }
-                for binding in &self.bindings {
-                    if !matches!(binding.kind, BindingKind::Display { .. }) {
-                        let enabled = field_available(&model, &binding.key, &binding.capability);
-                        if (IsWindowEnabled(binding.hwnd) != 0) != enabled {
-                            EnableWindow(binding.hwnd, enabled as i32);
+                    } else {
+                        // Keep the row and its neighbors stable after a
+                        // missed sample, and clear the stale reading.
+                        let missing = super::i18n::tr_static("暂无数据");
+                        let value_changed = text_if_changed(placed.value, "—");
+                        changed_readings += u64::from(value_changed);
+                        let changed = text_if_changed(placed.detail, missing) || value_changed;
+                        if changed {
+                            a11y::annotate(
+                                placed.value,
+                                &a11y::key(&self.accessibility_scope(), "metric", &placed.key),
+                                Some(&format!("{} · {}", get_text(placed.name), missing)),
+                                Some(missing),
+                            );
                         }
                     }
-                    if !self.dirty.contains(&binding.key) {
-                        set_binding(binding, &model.value(&binding.key));
+                }
+                if changed_readings != 0 {
+                    self.bridge.diagnostics.main_metric_text_updates
+                        .fetch_add(changed_readings, Ordering::Relaxed);
+                }
+                for binding in &self.bindings {
+                    if self.page == Page::Dashboard && binding.key == GPU_PROCESS_SELECTOR {
+                        continue;
+                    }
+                    if !matches!(binding.kind, BindingKind::Display { .. }) {
+                        let enabled = field_available(&model, &binding.key, &binding.capability);
+                        enable_if_changed(binding.hwnd, enabled);
+                    }
+                    let selecting = matches!(binding.kind, BindingKind::Choice(_))
+                        && SendMessageW(binding.hwnd, CB_GETDROPPEDSTATE, 0, 0) != 0;
+                    if !self.dirty.contains(&binding.key) && !selecting {
+                        set_binding(binding, &field_value(&model, &binding.key));
                     }
                 }
                 for (id, (key, _)) in &self.pickers {
                     if let Some(binding) = self.bindings.iter().find(|binding| binding.key == *key)
                     {
-                        EnableWindow(
+                        enable_if_changed(
                             GetDlgItem(self.hwnd, *id as i32),
-                            IsWindowEnabled(binding.hwnd),
+                            IsWindowEnabled(binding.hwnd) != 0,
                         );
                     }
                 }
                 for (id, action) in &self.buttons {
-                    EnableWindow(
+                    enable_if_changed(
                         GetDlgItem(self.hwnd, *id as i32),
-                        (action.capability.is_empty() || model.can(action.capability)) as i32,
+                        action.capability.is_empty() || model.can(action.capability),
                     );
                 }
                 self.rendering = false;
-                self.update_tray_tip(&model);
             }
             self.apply_preferences(&model);
+        }
+    }
+    fn has_changed_page_structure(&mut self, model: &UiModel) -> bool {
+        if self.metadata_revision == model.metadata_revision {
+            return false;
+        }
+        if self.page != Page::Dashboard {
+            return true;
+        }
+        let full = snapshot(&self.bridge);
+        let sections = catalog::sections(self.page, self.tools_tab, &full);
+        let structure = DashboardStructure::new(&full, &sections);
+        if self.dashboard_structure.as_ref() != Some(&structure) {
+            return true;
+        }
+        self.metadata_revision = full.metadata_revision;
+        self.pending_process_options = Some(gpu_process_choices(&full));
+        false
+    }
+    unsafe fn sync_gpu_process_selector(&mut self) {
+        unsafe {
+            let Some(options) = self.pending_process_options.as_ref() else { return };
+            let Some(binding) = self.bindings.iter_mut().find(|binding| binding.key == GPU_PROCESS_SELECTOR)
+                else {
+                    self.pending_process_options = None;
+                    return;
+                };
+            let BindingKind::Choice(previous) = &mut binding.kind else {
+                self.pending_process_options = None;
+                return;
+            };
+            if previous == options {
+                self.pending_process_options = None;
+                return;
+            }
+            // Replacing a combo's items closes its native drop-down. Keep it
+            // interactive and apply the latest list once the user closes it.
+            if SendMessageW(binding.hwnd, CB_GETDROPPEDSTATE, 0, 0) != 0 {
+                return;
+            }
+            let Some(options) = self.pending_process_options.take() else { return };
+            let index = SendMessageW(binding.hwnd, CB_GETCURSEL, 0, 0) as usize;
+            let selected = previous.get(index).map(|choice| &choice.value).unwrap_or(&Value::Null);
+            set_choices(binding.hwnd, &options, selected);
+            let dpi = self.dpi as i32;
+            let mut client: RECT = zeroed();
+            GetClientRect(binding.hwnd, &mut client);
+            let dropped_width = options.iter().map(|choice| choice.label.chars().count() as i32 * 12 + 32)
+                .max().unwrap_or(0) * dpi / 96;
+            let dropped_width = dropped_width.clamp(client.right, client.right.max(360 * dpi / 96));
+            SendMessageW(binding.hwnd, CB_SETDROPPEDWIDTH, dropped_width as usize, 0);
+            enable_if_changed(binding.hwnd, options.len() > 1);
+            *previous = options;
+        }
+    }
+    fn has_new_metric_rows(&mut self, model: &UiModel) -> bool {
+        if !matches!(self.page, Page::Dashboard | Page::Battery) {
+            return false;
+        }
+        let mut observed_new_key = false;
+        for metric in &model.metrics {
+            if !self.observed_metric_keys.contains(&metric.key) {
+                self.observed_metric_keys.insert(metric.key.clone());
+                observed_new_key = true;
+            }
+        }
+        if !observed_new_key {
+            return false;
+        }
+        let has_row = |key: &str| self.metrics.iter().any(|placed| placed.key == key);
+        match self.page {
+            Page::Dashboard => super::sensors::groups(&snapshot(&self.bridge))
+                .iter()
+                .flat_map(|group| &group.metrics)
+                .any(|metric| !has_row(&metric.key)),
+            Page::Battery => model.metrics.iter().any(|metric| {
+                metric.key.to_ascii_lowercase().starts_with("battery") && !has_row(&metric.key)
+            }),
+            _ => false,
         }
     }
     unsafe fn poll_ui_effect(&mut self) {
@@ -4023,6 +4631,9 @@ impl App {
         unsafe {
             let list = GetDlgItem(self.hwnd, ID_NAV_LIST as i32);
             if IsWindowVisible(list) != 0 {
+                let Some(index) = main_nav().position(|(id, _)| id == index) else {
+                    return String::new();
+                };
                 let length = SendMessageW(list, LB_GETTEXTLEN, index, 0);
                 if (0..512).contains(&length) {
                     let mut buffer = vec![0u16; length as usize + 1];
@@ -4111,6 +4722,7 @@ impl App {
             if self.pending.values().any(|shutdown| *shutdown) {
                 return;
             }
+            self.cancel_tray_hover();
             if let Err(error) = self.popup.hide() {
                 message(
                     self.hwnd,
@@ -4206,23 +4818,14 @@ impl App {
             }
         }
     }
-    unsafe fn update_tray_tip(&mut self, model: &UiModel) {
+    unsafe fn cancel_tray_hover(&mut self) {
         unsafe {
-            if !self.tray {
-                return;
+            self.tray_hover_at = None;
+            KillTimer(self.hwnd, TRAY_HOVER_TIMER);
+            if let Err(error) = self.popup.hide_hover() {
+                text(self.notice, &format!("托盘状态卡清理未确认：{error:#}"));
             }
-            let summary = model
-                .metrics
-                .iter()
-                .take(3)
-                .map(|m| format!("{} {}", m.label, m.value))
-                .collect::<Vec<_>>()
-                .join(" · ");
-            copy_wide(
-                &mut self.tray_data.szTip,
-                &format!("拯救者工具箱\n{summary}"),
-            );
-            Shell_NotifyIconW(NIM_MODIFY, &self.tray_data);
+            self.report_visibility();
         }
     }
     unsafe fn tray_menu(&mut self) {
@@ -4341,6 +4944,10 @@ impl App {
         }
     }
     unsafe fn hide_status_popup(&mut self) {
+        unsafe {
+            self.tray_hover_at = None;
+            KillTimer(self.hwnd, TRAY_HOVER_TIMER);
+        }
         if let Err(error) = self.popup.hide() {
             unsafe {
                 text(self.notice, &format!("状态窗口清理未确认：{error:#}"));
@@ -4402,16 +5009,14 @@ unsafe fn set_binding(binding: &Binding, value: &Value) {
     unsafe {
         match &binding.kind {
             BindingKind::Toggle => {
-                SendMessageW(
-                    binding.hwnd,
-                    BM_SETCHECK,
-                    if value.as_bool().unwrap_or(false) {
-                        BST_CHECKED as usize
-                    } else {
-                        BST_UNCHECKED as usize
-                    },
-                    0,
-                );
+                let state = if value.as_bool().unwrap_or(false) {
+                    BST_CHECKED
+                } else {
+                    BST_UNCHECKED
+                };
+                if SendMessageW(binding.hwnd, BM_GETCHECK, 0, 0) != state as isize {
+                    SendMessageW(binding.hwnd, BM_SETCHECK, state as usize, 0);
+                }
             }
             BindingKind::Text | BindingKind::Number => {
                 let v = scalar(value);
@@ -4451,6 +5056,26 @@ unsafe fn copy_wide<const N: usize>(dest: &mut [u16; N], source: &str) {
 #[cfg(test)]
 mod presentation_regression_tests {
     use super::*;
+    #[test]
+    fn dashboard_structure_ignores_live_values_and_unrelated_metadata() {
+        let mut model = UiModel::default();
+        let structure = |m: &UiModel| DashboardStructure::new(m, &catalog::sections(Page::Dashboard, 0, m));
+        let initial = structure(&model);
+        model.set_value("display.brightness", 40);
+        model.metrics.push(UiMetric { key: "CpuTemperature".into(), value: "62 °C".into(), ..Default::default() });
+        model.collections.insert("packages".into(), vec![UiItem { id: "driver".into(), ..Default::default() }]);
+        model.touch_metadata();
+        assert!(structure(&model) == initial);
+
+        model.collections.insert("gpu.processes".into(), vec![UiItem { id: "1:2".into(), label: "example.exe".into(), ..Default::default() }]);
+        model.touch_metadata();
+        assert!(structure(&model) == initial);
+        assert_eq!(gpu_process_choices(&model)[1].value, json!("1:2"));
+
+        model.options.insert("power.mode".into(), vec![UiChoice::new("均衡", 2)]);
+        model.touch_metadata();
+        assert!(structure(&model) != initial);
+    }
     #[test]
     fn native_static_print_uses_solid_surface_and_muted_text_from_the_parent() {
         unsafe extern "system" fn parent_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> isize {
