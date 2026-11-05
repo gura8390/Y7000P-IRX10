@@ -798,6 +798,13 @@ impl Engine {
     }
     fn dispatch_next(&mut self, work: &mut Work) -> Result<()> {
         let action = work.remaining.pop_front().context("操作计划不能为空")?;
+        // Empty background Fn polling is routine listening, not a foreground
+        // operation. Pulsing the UI busy flag at every 50ms poll would otherwise
+        // republish the whole live snapshot even while the machine is idle.
+        // The physical ticket still owns admission and remains visible in the
+        // CLI physical diagnostics; a stalled poll is published below.
+        let background_key_read = matches!(action, A::ReadDriverKeyEvents)
+            && self.internal_requests.contains_key(&work.id);
         if matches!(action, A::EnableCpu { .. }) {
             self.cpu_possible = true;
         }
@@ -826,7 +833,7 @@ impl Engine {
             work,
             started: monotonic_ms(),
         });
-        self.value("backend.busy", json!(true));
+        self.value("backend.busy", json!(!background_key_read));
         Ok(())
     }
     fn poll_write(&mut self) -> Result<()> {
@@ -856,6 +863,10 @@ impl Engine {
                         .cancel
                         .store(true, std::sync::atomic::Ordering::Release);
                     let id = pending.work.id;
+                    // A quiet background read that exceeds its real deadline
+                    // must no longer look idle. Keep the original ticket and
+                    // cancellation state until actual completion is returned.
+                    self.value("backend.busy", json!(true));
                     if !self.internal_requests.contains_key(&id) {
                         self.finish(
                             id,
@@ -2604,6 +2615,80 @@ mod lifecycle_tests {
             f.sender.send(command).unwrap();
             None
         }
+    }
+    #[test]
+    fn routine_internal_key_reads_keep_ui_idle_but_retain_physical_admission() {
+        let mut f = Fixture::new();
+        f.engine.value("backend.busy", json!(false));
+        let revision = f.engine.state.lock().unwrap().revision;
+        for _ in 0..4 {
+            let answer = f.answer();
+            let id = f.engine.new_internal_request().unwrap();
+            f.engine
+                .start_work(
+                    id,
+                    "keys.driver.read",
+                    vec![A::ReadDriverKeyEvents],
+                    After::SnapshotRead {
+                        key: "keys.driver".into(),
+                    },
+                )
+                .unwrap();
+            assert_eq!(f.engine.state.lock().unwrap().revision, revision);
+            assert!(f.engine.pending.is_some());
+            // A retained physical read still prevents an overlapping writer.
+            assert!(
+                f.engine
+                    .start_work(42, "foreground", vec![A::ReadCpu], After::Hardware)
+                    .is_err()
+            );
+            *answer.lock().unwrap() = Some(Ok(json!({"raw_keys":[]})));
+            f.engine.poll_write().unwrap();
+            assert!(f.engine.take_internal_result(id).unwrap().is_ok());
+            assert_eq!(f.engine.state.lock().unwrap().revision, revision);
+        }
+        let _answer = f.answer();
+        f.engine
+            .start_work(42, "foreground", vec![A::ReadCpu], After::Hardware)
+            .unwrap();
+        assert_eq!(
+            f.engine.state.lock().unwrap().values["backend.busy"],
+            json!(true)
+        );
+    }
+    #[test]
+    fn stalled_internal_key_read_becomes_busy_without_replacing_its_ticket() {
+        let mut f = Fixture::new();
+        let answer = f.answer();
+        let id = f.engine.new_internal_request().unwrap();
+        f.engine
+            .start_work(
+                id,
+                "keys.driver.read",
+                vec![A::ReadDriverKeyEvents],
+                After::SnapshotRead {
+                    key: "keys.driver".into(),
+                },
+            )
+            .unwrap();
+        f.engine.pending.as_mut().unwrap().started = monotonic_ms().saturating_sub(2000);
+        f.engine.poll_write().unwrap();
+        let pending = f.engine.pending.as_ref().unwrap();
+        assert_eq!(pending.work.id, id);
+        assert!(pending.work.late && pending.cancel.load(Ordering::Acquire));
+        assert_eq!(
+            f.engine.state.lock().unwrap().values["backend.busy"],
+            json!(true)
+        );
+        assert_eq!(f.log.lock().unwrap().len(), 1);
+        *answer.lock().unwrap() = Some(Ok(json!({"raw_keys":[]})));
+        f.engine.poll_write().unwrap();
+        assert!(f.engine.pending.is_none());
+        assert_eq!(
+            f.engine.state.lock().unwrap().values["backend.busy"],
+            json!(false)
+        );
+        assert!(f.engine.take_internal_result(id).unwrap().is_err());
     }
     #[test]
     fn foreground_shutdown_cancels_remaining_plan_and_queued_read_before_reaping() {

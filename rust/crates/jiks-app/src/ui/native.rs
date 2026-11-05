@@ -17,18 +17,21 @@ use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::*;
 use windows_sys::Win32::UI::HiDpi::*;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetKeyState, IsWindowEnabled};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, GetFocus, GetKeyState, IsWindowEnabled, TME_LEAVE, TRACKMOUSEEVENT,
+    TrackMouseEvent,
+};
 use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 // Stable Windows SDK constants omitted/gated in windows-sys metadata.
 pub(super) const SS_LEFT: u32 = 0;
-pub(super) const SS_ETCHEDHORZ: u32 = 0x10;
 pub(super) const TRACKBAR_GET_POSITION: u32 = WM_USER;
 const TRAY_KEY_SELECT: u32 = NIN_SELECT | 1;
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Palette {
     paper: u32,
+    surface: u32,
     ink: u32,
     accent: u32,
     muted: u32,
@@ -38,18 +41,48 @@ struct Palette {
 impl Default for Palette {
     fn default() -> Self {
         Self {
-            paper: 0x00f0f5f5,
-            ink: 0x002e1a1a,
-            accent: 0x0060340f,
+            paper: 0x00f8f3f1,
+            surface: 0x00ffffff,
+            ink: 0x00202020,
+            accent: 0x00ff9c6b,
             muted: 0x00666666,
-            line: 0x00c8d0d0,
-            pressed: 0x00e4eaea,
+            line: 0x00e2e2e2,
+            pressed: 0x00e7e7e7,
         }
     }
 }
-thread_local! {static PALETTE:Cell<Palette>=Cell::new(Palette::default());}
+thread_local! {
+    static PALETTE:Cell<Palette>=Cell::new(Palette::default());
+    static FONT_FAMILY:RefCell<Option<String>>=const {RefCell::new(None)};
+    static PAINT_BRUSHES:RefCell<PaintBrushes>=const {RefCell::new(PaintBrushes(Vec::new()))};
+}
+struct PaintBrushes(Vec<(u32, HBRUSH)>);
+impl Drop for PaintBrushes {
+    fn drop(&mut self) {
+        unsafe {
+            for (_, brush) in self.0.drain(..) {
+                DeleteObject(brush);
+            }
+        }
+    }
+}
+unsafe fn presentation_brush(color: u32) -> HBRUSH {
+    PAINT_BRUSHES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some((_, brush)) = cache.0.iter().find(|(known, _)| *known == color) {
+            *brush
+        } else {
+            let brush = unsafe { CreateSolidBrush(color) };
+            cache.0.push((color, brush));
+            brush
+        }
+    })
+}
 pub(super) fn paper() -> u32 {
     PALETTE.with(|p| p.get().paper)
+}
+pub(super) fn surface() -> u32 {
+    PALETTE.with(|p| p.get().surface)
 }
 pub(super) fn ink() -> u32 {
     PALETTE.with(|p| p.get().ink)
@@ -72,12 +105,13 @@ fn apply_palette(model: &UiModel) -> bool {
         .unwrap_or("light");
     let mut next = if theme.eq_ignore_ascii_case("dark") {
         Palette {
-            paper: 0x002c2421,
-            ink: 0x00e8ecee,
-            accent: 0x0086552c,
-            muted: 0x00b8b3ae,
-            line: 0x005e524b,
-            pressed: 0x003d332e,
+            paper: 0x00202020,
+            surface: 0x002c2c2c,
+            ink: 0x00f0f0f0,
+            accent: 0x00e0b060,
+            muted: 0x00b4b4b4,
+            line: 0x00404040,
+            pressed: 0x00383838,
         }
     } else {
         Palette::default()
@@ -616,8 +650,315 @@ pub(super) unsafe fn create(
         );
         if !hwnd.is_null() {
             SendMessageW(hwnd, WM_SETFONT, font as usize, 1);
+            if class == "STATIC" {
+                install_label_paint(hwnd);
+            }
+            if class == "BUTTON" && style & BS_TYPEMASK as u32 == BS_OWNERDRAW as u32 {
+                SetWindowSubclass(hwnd, Some(button_hover), 0x4A494B53, 0);
+            } else if class == "BUTTON" && style & BS_TYPEMASK as u32 == BS_AUTOCHECKBOX as u32 {
+                SetWindowSubclass(hwnd, Some(toggle_paint), 0x4A49544F, 0);
+            }
         }
         hwnd
+    }
+}
+pub(super) unsafe fn install_label_paint(hwnd: HWND) {
+    unsafe {
+        presentation_flag(hwnd, "Jiks.Text", true);
+    }
+}
+/// Keep the native checkbox's state, keyboard handling and UIA Toggle provider.
+/// Only its paint is replaced, so BM_CLICK/BM_GETCHECK retain normal semantics.
+unsafe extern "system" fn toggle_paint(
+    hwnd: HWND,
+    msg: u32,
+    wp: usize,
+    lp: isize,
+    _: usize,
+    _: usize,
+) -> isize {
+    unsafe {
+        if msg == WM_PAINT || msg == WM_PRINTCLIENT {
+            let mut ps: PAINTSTRUCT = zeroed();
+            let dc = if msg == WM_PAINT {
+                BeginPaint(hwnd, &mut ps)
+            } else {
+                wp as HDC
+            };
+            let saved_dc = SaveDC(dc);
+            let mut rect: RECT = zeroed();
+            GetClientRect(hwnd, &mut rect);
+            let on_surface = !GetPropW(hwnd, wide("Jiks.Surface").as_ptr()).is_null();
+            fill(dc, &rect, if on_surface { surface() } else { paper() });
+            let dpi = GetDpiForWindow(hwnd).max(96) as i32;
+            let s = |n: i32| n * dpi / 96;
+            let checked = SendMessageW(hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+            let enabled = IsWindowEnabled(hwnd) != 0;
+            let top = (rect.bottom - s(20)) / 2;
+            let color = if enabled && checked {
+                accent()
+            } else {
+                muted()
+            };
+            let pen = CreatePen(PS_SOLID, 1, color);
+            let old_pen = SelectObject(dc, pen);
+            let brush = CreateSolidBrush(if checked && enabled {
+                accent()
+            } else {
+                surface()
+            });
+            let old_brush = SelectObject(dc, brush);
+            RoundRect(dc, s(2), top, s(42), top + s(20), s(20), s(20));
+            SelectObject(dc, old_brush);
+            DeleteObject(brush);
+            let knob = CreateSolidBrush(if checked && enabled {
+                0x00202020
+            } else {
+                muted()
+            });
+            let old_brush = SelectObject(dc, knob);
+            let x = if checked { s(25) } else { s(6) };
+            Ellipse(dc, x, top + s(4), x + s(12), top + s(16));
+            SelectObject(dc, old_brush);
+            SelectObject(dc, old_pen);
+            DeleteObject(knob);
+            DeleteObject(pen);
+            let caption = get_text(hwnd);
+            if !caption.is_empty() {
+                let old_font = SelectObject(dc, SendMessageW(hwnd, WM_GETFONT, 0, 0) as HGDIOBJ);
+                SetBkMode(dc, TRANSPARENT as i32);
+                SetTextColor(dc, if enabled { ink() } else { muted() });
+                let mut label = RECT {
+                    left: s(52),
+                    ..rect
+                };
+                DrawTextW(
+                    dc,
+                    wide(&caption).as_ptr(),
+                    -1,
+                    &mut label,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                );
+                SelectObject(dc, old_font);
+            }
+            if GetFocus() == hwnd {
+                let mut focus = rect;
+                InflateRect(&mut focus, -1, -1);
+                DrawFocusRect(dc, &focus);
+            }
+            RestoreDC(dc, saved_dc);
+            if msg == WM_PAINT {
+                EndPaint(hwnd, &ps);
+            }
+            return 0;
+        }
+        if msg == WM_ERASEBKGND {
+            return 1;
+        }
+        if msg == WM_NCDESTROY {
+            RemoveWindowSubclass(hwnd, Some(toggle_paint), 0x4A49544F);
+        }
+        let result = DefSubclassProc(hwnd, msg, wp, lp);
+        if matches!(
+            msg,
+            BM_SETCHECK | BM_CLICK | WM_ENABLE | WM_SETFOCUS | WM_KILLFOCUS
+        ) {
+            InvalidateRect(hwnd, null(), 0);
+        }
+        result
+    }
+}
+pub(super) unsafe fn presentation_flag(hwnd: HWND, name: &str, enabled: bool) {
+    unsafe {
+        if enabled {
+            // This subclass owns only these fixed presentation properties.
+            // It also covers STATIC/EDIT controls that have no paint subclass.
+            if SetWindowSubclass(hwnd, Some(presentation_cleanup), 0x4A495052, 0) != 0 {
+                SetPropW(hwnd, wide(name).as_ptr(), 1usize as HANDLE);
+            }
+        } else {
+            RemovePropW(hwnd, wide(name).as_ptr());
+        }
+    }
+}
+unsafe extern "system" fn presentation_cleanup(
+    hwnd: HWND,
+    msg: u32,
+    wp: usize,
+    lp: isize,
+    _: usize,
+    _: usize,
+) -> isize {
+    unsafe {
+        if msg == WM_PRINT || msg == WM_PRINTCLIENT {
+            let dc = wp as HDC;
+            let saved = SaveDC(dc);
+            let region = CreateRectRgn(0, 0, 0, 0);
+            if GetWindowRgn(hwnd, region) != ERROR {
+                let mut bounds: RECT = zeroed();
+                GetRgnBox(region, &mut bounds);
+                // IntersectClipRect transforms logical coordinates through the
+                // print DC's current viewport. ExtSelectClipRgn instead expects
+                // device coordinates and can clip a different child here.
+                IntersectClipRect(dc, bounds.left, bounds.top, bounds.right, bounds.bottom);
+            }
+            if !GetPropW(hwnd, wide("Jiks.Text").as_ptr()).is_null() {
+                let surface_label = !GetPropW(hwnd, wide("Jiks.Surface").as_ptr()).is_null();
+                let muted_label = !GetPropW(hwnd, wide("Jiks.Muted").as_ptr()).is_null();
+                let color = if surface_label { surface() } else { paper() };
+                let transparent = !surface_label
+                    && !GetPropW(GetParent(hwnd), wide("Jiks.Background").as_ptr()).is_null();
+                let mut rect: RECT = zeroed();
+                GetClientRect(hwnd, &mut rect);
+                if !transparent {
+                    FillRect(dc, &rect, presentation_brush(color));
+                }
+                SetBkColor(dc, color);
+                SetBkMode(
+                    dc,
+                    if transparent {
+                        TRANSPARENT as i32
+                    } else {
+                        OPAQUE as i32
+                    },
+                );
+                SetTextColor(
+                    dc,
+                    if muted_label || IsWindowEnabled(hwnd) == 0 {
+                        muted()
+                    } else {
+                        ink()
+                    },
+                );
+                SelectObject(dc, SendMessageW(hwnd, WM_GETFONT, 0, 0) as HGDIOBJ);
+            }
+            let result = DefSubclassProc(hwnd, msg, wp, lp);
+            RestoreDC(dc, saved);
+            DeleteObject(region);
+            return result;
+        }
+        if msg == WM_NCDESTROY {
+            for property in [
+                "Jiks.Surface",
+                "Jiks.Muted",
+                "Jiks.Selected",
+                "Jiks.Primary",
+                "Jiks.ActionCard",
+                "Jiks.Background",
+                "Jiks.Text",
+            ] {
+                RemovePropW(hwnd, wide(property).as_ptr());
+            }
+            RemoveWindowSubclass(hwnd, Some(presentation_cleanup), 0x4A495052);
+        }
+        DefSubclassProc(hwnd, msg, wp, lp)
+    }
+}
+/// Paint-only messages can arrive synchronously while a layout method owns
+/// RefMut<App/Editor>. HWND presentation flags avoid reborrowing application
+/// state or silently falling back to system-grey controls in that path.
+pub(super) unsafe fn presentation_message(msg: u32, wp: usize, lp: isize) -> Option<isize> {
+    unsafe {
+        match msg {
+            WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
+                let hwnd = lp as HWND;
+                let dc = wp as HDC;
+                let on_surface = !GetPropW(hwnd, wide("Jiks.Surface").as_ptr()).is_null();
+                let muted_text = !GetPropW(hwnd, wide("Jiks.Muted").as_ptr()).is_null();
+                SetTextColor(dc, if muted_text { muted() } else { ink() });
+                SetBkMode(dc, TRANSPARENT as i32);
+                let color = if on_surface { surface() } else { paper() };
+                SetBkColor(dc, color);
+                SetDCBrushColor(dc, color);
+                Some(
+                    if msg == WM_CTLCOLORSTATIC
+                        && !on_surface
+                        && !GetPropW(GetParent(hwnd), wide("Jiks.Background").as_ptr()).is_null()
+                    {
+                        GetStockObject(NULL_BRUSH) as isize
+                    } else {
+                        presentation_brush(color) as isize
+                    },
+                )
+            }
+            WM_DRAWITEM => {
+                let item = &*(lp as *const DRAWITEMSTRUCT);
+                if !GetPropW(item.hwndItem, wide("Jiks.Primary").as_ptr()).is_null() {
+                    paint_primary_button(item);
+                } else {
+                    paint_button(
+                        item,
+                        !GetPropW(item.hwndItem, wide("Jiks.Selected").as_ptr()).is_null(),
+                    );
+                }
+                Some(1)
+            }
+            _ => None,
+        }
+    }
+}
+/// Clip a scrolled control to its viewport rather than hiding its entire
+/// contents when only the first/last line crosses a viewport edge.
+pub(super) unsafe fn clip_to_viewport(
+    hwnd: HWND,
+    y: i32,
+    width: i32,
+    height: i32,
+    top: i32,
+    bottom: i32,
+    dpi: u32,
+) -> bool {
+    unsafe {
+        let visible_top = (top - y).max(0).min(height);
+        let visible_bottom = (bottom - y).max(0).min(height);
+        let scale = |n: i32| n * dpi as i32 / 96;
+        let region = CreateRectRgn(
+            0,
+            scale(visible_top),
+            scale(width.max(0)),
+            scale(visible_bottom),
+        );
+        if SetWindowRgn(hwnd, region, 1) == 0 {
+            DeleteObject(region);
+        }
+        visible_bottom > visible_top
+    }
+}
+unsafe extern "system" fn button_hover(
+    hwnd: HWND,
+    msg: u32,
+    wp: usize,
+    lp: isize,
+    _: usize,
+    _: usize,
+) -> isize {
+    unsafe {
+        let property = wide("Jiks.Button.Hover");
+        match msg {
+            WM_MOUSEMOVE => {
+                if GetPropW(hwnd, property.as_ptr()).is_null() {
+                    SetPropW(hwnd, property.as_ptr(), 1usize as HANDLE);
+                    let mut track = TRACKMOUSEEVENT {
+                        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0,
+                    };
+                    TrackMouseEvent(&mut track);
+                    InvalidateRect(hwnd, null(), 0);
+                }
+            }
+            WM_MOUSELEAVE => {
+                RemovePropW(hwnd, property.as_ptr());
+                InvalidateRect(hwnd, null(), 0);
+            }
+            WM_NCDESTROY => {
+                RemovePropW(hwnd, property.as_ptr());
+                RemoveWindowSubclass(hwnd, Some(button_hover), 0x4A494B53);
+            }
+            _ => {}
+        }
+        DefSubclassProc(hwnd, msg, wp, lp)
     }
 }
 pub(super) unsafe fn font(dpi: u32, points: i32, bold: bool) -> HFONT {
@@ -688,16 +1029,21 @@ pub(super) unsafe fn preferred_font_available() -> bool {
     }
 }
 unsafe fn font_family() -> String {
-    unsafe {
-        let dc = GetDC(null_mut());
-        let family = ["方正公文楷体", "FZGWKaiS", "Microsoft YaHei UI"]
-            .into_iter()
-            .find(|name| exact_font_present(dc, name))
-            .unwrap_or("Microsoft YaHei UI")
-            .to_owned();
-        ReleaseDC(null_mut(), dc);
-        family
-    }
+    FONT_FAMILY.with(|cached| {
+        cached
+            .borrow_mut()
+            .get_or_insert_with(|| unsafe {
+                let dc = GetDC(null_mut());
+                let family = ["Microsoft YaHei UI", "Segoe UI"]
+                    .into_iter()
+                    .find(|name| exact_font_present(dc, name))
+                    .unwrap_or("Microsoft YaHei UI")
+                    .to_owned();
+                ReleaseDC(null_mut(), dc);
+                family
+            })
+            .clone()
+    })
 }
 pub(super) unsafe fn fill(dc: HDC, rect: &RECT, color: u32) {
     unsafe {
@@ -706,57 +1052,121 @@ pub(super) unsafe fn fill(dc: HDC, rect: &RECT, color: u32) {
         DeleteObject(brush);
     }
 }
+/// Flat Fluent-style surface shared by the main pages and native dialogs.
+/// Painting stays event-driven: no composition/GPU loop or image cache.
+pub(super) unsafe fn paint_card(dc: HDC, rect: &RECT, dpi: u32) {
+    unsafe {
+        let pen = CreatePen(PS_SOLID, 1, line());
+        let brush = CreateSolidBrush(surface());
+        let old_pen = SelectObject(dc, pen);
+        let old_brush = SelectObject(dc, brush);
+        let radius = (8 * dpi as i32 / 96).max(2);
+        RoundRect(
+            dc,
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+            radius,
+            radius,
+        );
+        SelectObject(dc, old_pen);
+        SelectObject(dc, old_brush);
+        DeleteObject(pen);
+        DeleteObject(brush);
+    }
+}
 pub(super) unsafe fn paint_button(item: &DRAWITEMSTRUCT, selected: bool) {
     unsafe {
+        let saved_dc = SaveDC(item.hDC);
         let disabled = item.itemState & ODS_DISABLED != 0;
         let pressed = item.itemState & ODS_SELECTED != 0;
-        let background = if selected {
-            accent()
-        } else if pressed {
+        let navigation = (item.CtlID >= ID_NAV as u32
+            && item.CtlID < ID_NAV as u32 + Page::ALL.len() as u32)
+            || (item.CtlID >= ID_TOOL_NAV as u32 && item.CtlID < ID_TOOL_NAV as u32 + 8);
+        let hovered = !GetPropW(item.hwndItem, wide("Jiks.Button.Hover").as_ptr()).is_null();
+        let background = if selected || pressed || (!disabled && hovered) {
             PALETTE.with(|p| p.get().pressed)
-        } else {
+        } else if navigation {
             paper()
+        } else {
+            surface()
         };
         fill(item.hDC, &item.rcItem, background);
-        let pen = CreatePen(PS_SOLID, 1, if selected { accent() } else { line() });
+        let pen = CreatePen(PS_SOLID, 1, if navigation { background } else { line() });
         let old_pen = SelectObject(item.hDC, pen);
         let old_brush = SelectObject(item.hDC, GetStockObject(NULL_BRUSH));
-        Rectangle(
+        let dpi = GetDpiForWindow(item.hwndItem).max(96);
+        let corner = (8 * dpi as i32 / 96).max(2);
+        RoundRect(
             item.hDC,
             item.rcItem.left,
             item.rcItem.top,
             item.rcItem.right,
             item.rcItem.bottom,
+            corner,
+            corner,
         );
         SelectObject(item.hDC, old_pen);
         SelectObject(item.hDC, old_brush);
         DeleteObject(pen);
         SetBkMode(item.hDC, TRANSPARENT as i32);
-        SetTextColor(
-            item.hDC,
-            if disabled {
-                0x00909090
-            } else if selected {
-                0x00ffffff
-            } else {
-                ink()
-            },
-        );
+        SetTextColor(item.hDC, if disabled { 0x00909090 } else { ink() });
         let label = wide(&get_text(item.hwndItem));
         let mut rect = item.rcItem;
-        let navigation =
+        let main_navigation =
             item.CtlID >= ID_NAV as u32 && item.CtlID < ID_NAV as u32 + Page::ALL.len() as u32;
+        let action_card = !GetPropW(item.hwndItem, wide("Jiks.ActionCard").as_ptr()).is_null();
         if navigation {
-            paint_nav_icon(item, item.CtlID - ID_NAV as u32);
-            rect.left += rect.bottom - rect.top + 7;
+            if selected {
+                let width = (3 * dpi as i32 / 96).max(2);
+                let margin = (10 * dpi as i32 / 96).max(4);
+                fill(
+                    item.hDC,
+                    &RECT {
+                        left: rect.left + 1,
+                        top: rect.top + margin,
+                        right: rect.left + width + 1,
+                        bottom: rect.bottom - margin,
+                    },
+                    accent(),
+                );
+            }
+            if main_navigation {
+                paint_nav_icon(item, item.CtlID - ID_NAV as u32);
+                rect.top += 29 * dpi as i32 / 96;
+            } else {
+                // Categories retain the old settings sidebar's icon + title.
+                paint_nav_icon(
+                    item,
+                    [4, 8, 3, 5, 1, 6, 5, 6][(item.CtlID - ID_TOOL_NAV as u32) as usize],
+                );
+                rect.left += rect.bottom - rect.top + 5;
+            }
+        } else if action_card {
+            paint_nav_icon(item, 6);
+            rect.left += 44 * dpi as i32 / 96;
+            rect.right -= 30 * dpi as i32 / 96;
+            let mut arrow = item.rcItem;
+            arrow.left = arrow.right - 30 * dpi as i32 / 96;
+            DrawTextW(
+                item.hDC,
+                wide("›").as_ptr(),
+                -1,
+                &mut arrow,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
         }
         DrawTextW(
             item.hDC,
             label.as_ptr(),
             -1,
             &mut rect,
-            (if navigation { DT_LEFT } else { DT_CENTER })
-                | DT_VCENTER
+            (if (navigation && !main_navigation) || action_card {
+                DT_LEFT
+            } else {
+                DT_CENTER
+            }) | DT_VCENTER
                 | DT_SINGLELINE
                 | DT_END_ELLIPSIS,
         );
@@ -764,15 +1174,84 @@ pub(super) unsafe fn paint_button(item: &DRAWITEMSTRUCT, selected: bool) {
             InflateRect(&mut rect, -3, -3);
             DrawFocusRect(item.hDC, &rect);
         }
+        RestoreDC(item.hDC, saved_dc);
+    }
+}
+pub(super) unsafe fn paint_primary_button(item: &DRAWITEMSTRUCT) {
+    unsafe {
+        let saved_dc = SaveDC(item.hDC);
+        let disabled = item.itemState & ODS_DISABLED != 0;
+        let background = if disabled { line() } else { accent() };
+        fill(item.hDC, &item.rcItem, paper());
+        let brush = CreateSolidBrush(background);
+        let pen = CreatePen(PS_SOLID, 1, background);
+        let old_brush = SelectObject(item.hDC, brush);
+        let old_pen = SelectObject(item.hDC, pen);
+        let radius = (8 * GetDpiForWindow(item.hwndItem).max(96) as i32 / 96).max(2);
+        RoundRect(
+            item.hDC,
+            item.rcItem.left,
+            item.rcItem.top,
+            item.rcItem.right,
+            item.rcItem.bottom,
+            radius,
+            radius,
+        );
+        SelectObject(item.hDC, old_brush);
+        SelectObject(item.hDC, old_pen);
+        DeleteObject(brush);
+        DeleteObject(pen);
+        SetBkMode(item.hDC, TRANSPARENT as i32);
+        // Theme/accent can be customized. Choose readable ink rather than
+        // assuming that every user-selected accent is dark.
+        let luminance = (background & 255) * 299
+            + ((background >> 8) & 255) * 587
+            + ((background >> 16) & 255) * 114;
+        SetTextColor(
+            item.hDC,
+            if disabled {
+                muted()
+            } else if luminance > 150000 {
+                0x00202020
+            } else {
+                0x00ffffff
+            },
+        );
+        let mut rect = item.rcItem;
+        DrawTextW(
+            item.hDC,
+            wide(&get_text(item.hwndItem)).as_ptr(),
+            -1,
+            &mut rect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+        if item.itemState & ODS_FOCUS != 0 {
+            InflateRect(&mut rect, -4, -4);
+            DrawFocusRect(item.hDC, &rect);
+        }
+        RestoreDC(item.hDC, saved_dc);
     }
 }
 
 unsafe fn paint_nav_icon(item: &DRAWITEMSTRUCT, index: u32) {
     unsafe {
         let h = (item.rcItem.bottom - item.rcItem.top).max(1);
-        let unit = (h / 16).max(1);
-        let x = item.rcItem.left + 6 * unit;
-        let y = item.rcItem.top + 4 * unit;
+        let dpi = GetDpiForWindow(item.hwndItem).max(96) as i32;
+        let unit = (2 * dpi / 96).max(1);
+        let stacked =
+            item.CtlID >= ID_NAV as u32 && item.CtlID < ID_NAV as u32 + Page::ALL.len() as u32;
+        let x = item.rcItem.left
+            + if stacked {
+                (item.rcItem.right - item.rcItem.left - 9 * unit) / 2
+            } else {
+                10 * dpi / 96
+            };
+        let y = item.rcItem.top
+            + if stacked {
+                7 * dpi / 96
+            } else {
+                (h - 9 * unit) / 2
+            };
         let p = |a: i32, b: i32| POINT {
             x: x + a * unit,
             y: y + b * unit,
@@ -913,6 +1392,17 @@ struct Placed {
     clip_height: i32,
     pinned: bool,
 }
+#[derive(Clone, Copy)]
+struct CardSurface {
+    rect: [i32; 4],
+    icon: Option<u32>,
+}
+struct MetricPlacement {
+    name: HWND,
+    value: HWND,
+    detail: HWND,
+    key: String,
+}
 enum DeferredEditor {
     DeviceInformation,
     Structured(catalog::EditorKind, Option<UiItem>),
@@ -1012,6 +1502,7 @@ struct App {
     heading_font: HFONT,
     title_font: HFONT,
     brush: HBRUSH,
+    surface_brush: HBRUSH,
     fixed: Vec<HWND>,
     content: Vec<Placed>,
     bindings: Vec<Binding>,
@@ -1019,7 +1510,10 @@ struct App {
     pickers: BTreeMap<u16, (String, super::selectors::PickerKind)>,
     drafts: BTreeMap<String, Value>,
     dirty: BTreeSet<String>,
-    metrics: Vec<(HWND, String)>,
+    metrics: Vec<MetricPlacement>,
+    cards: Vec<CardSurface>,
+    surface_children: BTreeSet<usize>,
+    muted_labels: BTreeSet<usize>,
     title: HWND,
     machine: HWND,
     notice: HWND,
@@ -1116,6 +1610,7 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
             heading_font: null_mut(),
             title_font: null_mut(),
             brush,
+            surface_brush: CreateSolidBrush(surface()),
             fixed: vec![],
             content: vec![],
             bindings: vec![],
@@ -1124,6 +1619,9 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
             drafts: BTreeMap::new(),
             dirty: BTreeSet::new(),
             metrics: vec![],
+            cards: vec![],
+            surface_children: BTreeSet::new(),
+            muted_labels: BTreeSet::new(),
             title: null_mut(),
             machine: null_mut(),
             notice: null_mut(),
@@ -1138,7 +1636,7 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
             taskbar_message: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
             show_message: RegisterWindowMessageW(wide("Jiks.ShowExisting.1").as_ptr()),
             popup: super::status_popup::StatusPopup::default(),
-            column_x: 212,
+            column_x: 132,
             started: Instant::now(),
             smoke_submitted: false,
             smoke_stage: 0,
@@ -1220,6 +1718,10 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
                     }
                 }
             }
+            #[cfg(debug_assertions)]
+            if super::capture_fixture::consume(&msg) {
+                continue;
+            }
             if IsDialogMessageW(hwnd, &msg) == 0 {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -1263,6 +1765,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
         let raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut RefCell<App>;
         if raw.is_null() {
             return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+        if let Some(result) = presentation_message(msg, wp, lp) {
+            return result;
         }
         let (result, destroy, editor, bridge) = {
             let Ok(mut app) = (*raw).try_borrow_mut() else {
@@ -1525,42 +2030,38 @@ unsafe fn dispatch_window(app: &mut App, msg: u32, wp: usize, lp: isize) -> Opti
                 let dc = wp as HDC;
                 SetTextColor(
                     dc,
-                    if lp as HWND == app.notice {
+                    if lp as HWND == app.notice || app.muted_labels.contains(&(lp as usize)) {
                         muted()
                     } else {
                         ink()
                     },
                 );
                 SetBkMode(dc, TRANSPARENT as i32);
-                SetBkColor(dc, paper());
+                let on_surface = app.surface_children.contains(&(lp as usize));
+                SetBkColor(dc, if on_surface { surface() } else { paper() });
                 Some(if app.background.visible() && msg == WM_CTLCOLORSTATIC {
                     GetStockObject(NULL_BRUSH) as isize
                 } else {
-                    app.brush as isize
+                    (if on_surface {
+                        app.surface_brush
+                    } else {
+                        app.brush
+                    }) as isize
                 })
             }
             WM_ERASEBKGND => {
-                let mut r: RECT = zeroed();
-                GetClientRect(app.hwnd, &mut r);
-                if !app.background.paint(wp as HDC, &r) {
-                    FillRect(wp as HDC, &r, app.brush);
-                }
+                app.paint_client(wp as HDC);
                 Some(1)
             }
             WM_PAINT => {
                 let mut ps: PAINTSTRUCT = zeroed();
                 let dc = BeginPaint(app.hwnd, &mut ps);
-                let mut r: RECT = zeroed();
-                GetClientRect(app.hwnd, &mut r);
-                let pen = CreatePen(PS_SOLID, 1, line());
-                let old = SelectObject(dc, pen);
-                MoveToEx(dc, app.s(190), app.s(104), null_mut());
-                LineTo(dc, app.s(190), r.bottom - app.s(58));
-                MoveToEx(dc, app.s(210), app.s(104), null_mut());
-                LineTo(dc, r.right - app.s(20), app.s(104));
-                SelectObject(dc, old);
-                DeleteObject(pen);
+                app.paint_client(dc);
                 EndPaint(app.hwnd, &ps);
+                Some(0)
+            }
+            WM_PRINTCLIENT => {
+                app.paint_client(wp as HDC);
                 Some(0)
             }
             WM_TRAY => {
@@ -1574,14 +2075,39 @@ unsafe fn dispatch_window(app: &mut App, msg: u32, wp: usize, lp: isize) -> Opti
                 Some(0)
             }
             WM_CLOSE => {
+                app.bridge
+                    .diagnostics
+                    .window_close_messages
+                    .fetch_add(1, Ordering::Relaxed);
                 if snapshot(&app.bridge).preferences.close_to_tray && app.tray {
                     ShowWindow(app.hwnd, SW_HIDE);
                 } else {
+                    app.bridge
+                        .diagnostics
+                        .last_exit_origin
+                        .store(1, Ordering::Relaxed);
                     app.shutdown();
                 }
                 Some(0)
             }
+            WM_QUERYENDSESSION | WM_ENDSESSION => {
+                app.bridge
+                    .diagnostics
+                    .session_end_messages
+                    .fetch_add(1, Ordering::Relaxed);
+                if msg == WM_ENDSESSION && wp != 0 {
+                    app.bridge
+                        .diagnostics
+                        .last_exit_origin
+                        .store(6, Ordering::Relaxed);
+                }
+                None
+            }
             WM_DESTROY => {
+                app.bridge
+                    .diagnostics
+                    .window_destroy_messages
+                    .fetch_add(1, Ordering::Relaxed);
                 KillTimer(app.hwnd, TIMER);
                 app.hide_status_popup();
                 if app.tray {
@@ -1614,6 +2140,9 @@ impl Drop for App {
             if !self.brush.is_null() {
                 DeleteObject(self.brush);
             }
+            if !self.surface_brush.is_null() {
+                DeleteObject(self.surface_brush);
+            }
         }
     }
 }
@@ -1645,9 +2174,9 @@ impl App {
                     DeleteObject(f);
                 }
             }
-            self.body_font = font(self.dpi, 15, false);
-            self.heading_font = font(self.dpi, 20, true);
-            self.title_font = font(self.dpi, 29, true);
+            self.body_font = font(self.dpi, 14, false);
+            self.heading_font = font(self.dpi, 17, true);
+            self.title_font = font(self.dpi, 26, true);
         }
     }
     unsafe fn build_fixed(&mut self) {
@@ -1660,20 +2189,20 @@ impl App {
                 self.hwnd,
                 "STATIC",
                 &super::i18n::tr("机控"),
-                SS_LEFT as u32,
+                1,
                 0,
-                [self.s(20), self.s(24), self.s(150), self.s(42)],
-                self.title_font,
+                [self.s(12), self.s(20), self.s(88), self.s(30)],
+                self.heading_font,
             );
             self.fixed.push(brand);
             a11y::annotate(brand, "main.brand", None, None);
             let sub = create(
                 self.hwnd,
                 "STATIC",
-                &super::i18n::tr("Jiks · 本机管理"),
-                SS_LEFT as u32,
+                "Jiks",
+                1,
                 0,
-                [self.s(22), self.s(70), self.s(150), self.s(24)],
+                [self.s(12), self.s(54), self.s(88), self.s(22)],
                 self.body_font,
             );
             self.fixed.push(sub);
@@ -1686,14 +2215,10 @@ impl App {
                     BS_OWNERDRAW as u32 | WS_TABSTOP,
                     ID_NAV + index as u16,
                     [
-                        self.s(20),
-                        self.s(if index < 6 {
-                            124 + index as i32 * 40
-                        } else {
-                            420 + (index as i32 - 6) * 40
-                        }),
-                        self.s(150),
-                        self.s(32),
+                        self.s(12),
+                        self.s(92 + index as i32 * 54),
+                        self.s(88),
+                        self.s(50),
                     ],
                     self.body_font,
                 );
@@ -1783,6 +2308,7 @@ impl App {
             );
             self.fixed.push(self.notice);
             a11y::annotate(self.notice, "main.status", None, None);
+            presentation_flag(self.notice, "Jiks.Muted", true);
             self.layout_fixed();
             self.rendering = false;
         }
@@ -1792,15 +2318,15 @@ impl App {
             let (w, h) = self.size();
             // A short client area uses one native scrolling navigation list.
             // Main and footer items never occupy the same row.
-            let compact_nav = h < 568;
+            let compact_nav = h < 642;
             let nav = GetDlgItem(self.hwnd, ID_NAV_LIST as i32);
             SetWindowPos(
                 nav,
                 null_mut(),
-                self.s(20),
-                self.s(124),
-                self.s(150),
-                self.s((h - 198).max(76)),
+                self.s(12),
+                self.s(92),
+                self.s(88),
+                self.s((h - 162).max(76)),
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
             SendMessageW(
@@ -1816,6 +2342,13 @@ impl App {
                     if compact_nav { SW_HIDE } else { SW_SHOWNA },
                 );
                 let page = Page::ALL[index];
+                let control = GetDlgItem(self.hwnd, ID_NAV as i32 + index as i32);
+                if page == self.page {
+                    presentation_flag(control, "Jiks.Selected", true);
+                } else {
+                    presentation_flag(control, "Jiks.Selected", false);
+                }
+                InvalidateRect(control, null(), 0);
                 a11y::annotate(
                     GetDlgItem(self.hwnd, ID_NAV as i32 + index as i32),
                     &a11y::key("main", "navigate", page.key()),
@@ -1827,21 +2360,21 @@ impl App {
                 SetWindowPos(
                     GetDlgItem(self.hwnd, ID_NAV as i32 + index as i32),
                     null_mut(),
-                    self.s(20),
-                    self.s(h - 174 + (index as i32 - 6) * 40),
-                    self.s(150),
-                    self.s(32),
+                    self.s(12),
+                    self.s(h - 222 + (index as i32 - 6) * 54),
+                    self.s(88),
+                    self.s(50),
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 );
             }
             for (hwnd, x, y, width, height) in [
-                (GetDlgItem(self.hwnd, ID_EXIT as i32), 20, h - 52, 150, 32),
-                (self.title, 210, 25, w - 470, 40),
+                (GetDlgItem(self.hwnd, ID_EXIT as i32), 12, h - 52, 88, 32),
+                (self.title, 132, 25, w - 392, 40),
                 (GetDlgItem(self.hwnd, ID_DEVICE as i32), w - 240, 30, 66, 30),
                 (GetDlgItem(self.hwnd, ID_LOG as i32), w - 166, 30, 66, 30),
                 (GetDlgItem(self.hwnd, ID_THEME as i32), w - 92, 30, 66, 30),
-                (self.machine, 212, 72, w - 234, 24),
-                (self.notice, 210, h - 48, w - 232, 40),
+                (self.machine, 134, 72, w - 156, 24),
+                (self.notice, 132, h - 48, w - 154, 40),
             ] {
                 SetWindowPos(
                     hwnd,
@@ -1886,6 +2419,10 @@ impl App {
                 clip_height: if class == "COMBOBOX" { 30 } else { rect[3] },
                 pinned: id >= ID_TOOL_NAV && id < ID_TOOL_NAV + 8,
             });
+            if !(id >= ID_TOOL_NAV && id < ID_TOOL_NAV + 8) {
+                self.surface_children.insert(h as usize);
+                presentation_flag(h, "Jiks.Surface", true);
+            }
             h
         }
     }
@@ -1905,6 +2442,142 @@ impl App {
             )
         }
     }
+    unsafe fn paint_client(&self, dc: HDC) {
+        unsafe {
+            let saved = SaveDC(dc);
+            let mut rect: RECT = zeroed();
+            GetClientRect(self.hwnd, &mut rect);
+            if !self.background.paint(dc, &rect) {
+                FillRect(dc, &rect, self.brush);
+            }
+            self.paint_surfaces(dc);
+            RestoreDC(dc, saved);
+        }
+    }
+    unsafe fn paint_surfaces(&self, dc: HDC) {
+        unsafe {
+            let (width, height) = self.size();
+            // Match the original frame: quiet sidebar, distinct content pane,
+            // and a compact status strip rather than heavy dividing rules.
+            if !self.background.visible() {
+                fill(
+                    dc,
+                    &RECT {
+                        left: 0,
+                        top: 0,
+                        right: self.s(width),
+                        bottom: self.s(height),
+                    },
+                    paper(),
+                );
+            }
+            let saved = SaveDC(dc);
+            IntersectClipRect(
+                dc,
+                self.s(124),
+                self.s(114),
+                self.s(width - 16),
+                self.s(height - 58),
+            );
+            for card in &self.cards {
+                let [x, y, w, h] = card.rect;
+                let y = y - self.scroll;
+                if y + h > 114 && y < height - 58 {
+                    paint_card(
+                        dc,
+                        &RECT {
+                            left: self.s(x),
+                            top: self.s(y),
+                            right: self.s(x + w),
+                            bottom: self.s(y + h),
+                        },
+                        self.dpi,
+                    );
+                    if let Some(icon) = card.icon {
+                        SetTextColor(dc, ink());
+                        let item = DRAWITEMSTRUCT {
+                            CtlID: ID_TOOL_NAV as u32,
+                            hDC: dc,
+                            hwndItem: self.hwnd,
+                            rcItem: RECT {
+                                left: self.s(x + 4),
+                                top: self.s(y + (h - 36) / 2),
+                                right: self.s(x + 40),
+                                bottom: self.s(y + (h + 36) / 2),
+                            },
+                            ..zeroed()
+                        };
+                        paint_nav_icon(&item, icon);
+                    }
+                }
+            }
+            RestoreDC(dc, saved);
+            let pen = CreatePen(PS_SOLID, 1, line());
+            let old = SelectObject(dc, pen);
+            MoveToEx(dc, self.s(132), self.s(height - 56), null_mut());
+            LineTo(dc, self.s(width - 20), self.s(height - 56));
+            SelectObject(dc, old);
+            DeleteObject(pen);
+        }
+    }
+    unsafe fn metric(&mut self, metric: &UiMetric, y: i32, width: i32) {
+        unsafe {
+            let origin = self.column_x;
+            let value_width = (width / 3).clamp(92, 160);
+            let detail_width = (width / 4).clamp(64, 180);
+            let name_width = (width - value_width - detail_width - 16).max(80);
+            let name = self.label(&metric.label, y + 3, name_width, false, 24);
+            self.column_x = origin + name_width + 8;
+            let value = self.placed(
+                "STATIC",
+                &metric.value,
+                2 | 0x4000,
+                0,
+                [self.column_x, y, value_width, 26],
+                self.heading_font,
+            );
+            self.column_x += value_width + 8;
+            let detail = self.placed(
+                "STATIC",
+                &metric.detail,
+                2 | 0x4000,
+                0,
+                [self.column_x, y + 3, detail_width, 24],
+                self.body_font,
+            );
+            self.muted_labels.insert(detail as usize);
+            presentation_flag(detail, "Jiks.Muted", true);
+            let scope = self.accessibility_scope();
+            a11y::annotate(
+                name,
+                &a11y::key(&scope, "metric-label", &metric.key),
+                None,
+                None,
+            );
+            a11y::annotate(
+                value,
+                &a11y::key(&scope, "metric", &metric.key),
+                Some(&format!(
+                    "{} {} {}",
+                    metric.label, metric.value, metric.detail
+                )),
+                None,
+            );
+            a11y::annotate(
+                detail,
+                &a11y::key(&scope, "metric-detail", &metric.key),
+                None,
+                None,
+            );
+            self.metrics.push(MetricPlacement {
+                name,
+                value,
+                detail,
+                key: metric.key.clone(),
+            });
+            self.column_x = origin;
+        }
+    }
     unsafe fn render(&mut self) {
         unsafe {
             if self.hwnd.is_null() {
@@ -1922,14 +2595,17 @@ impl App {
             self.buttons.clear();
             self.pickers.clear();
             self.metrics.clear();
+            self.cards.clear();
+            self.surface_children.clear();
+            self.muted_labels.clear();
             let model = snapshot(&self.bridge);
             self.rendered_revision = model.revision;
             self.metadata_revision = model.metadata_revision;
             let (w, _) = self.size();
-            let width = (w - 236).max(360);
+            let width = (w - 156).max(360);
             let mut y = 124;
-            self.column_x = 212;
-            let mut content_origin = 212;
+            self.column_x = 132;
+            let mut content_origin = 132;
             let mut content_width = width;
             if self.page == Page::Settings {
                 let nav_width = if width >= 650 { 190 } else { 64 };
@@ -1942,9 +2618,12 @@ impl App {
                         if nav_width < 100 { &short } else { title },
                         BS_OWNERDRAW as u32 | WS_TABSTOP,
                         ID_TOOL_NAV + index as u16,
-                        [212, 124 + index as i32 * 42, nav_width, 32],
+                        [132, 124 + index as i32 * 44, nav_width, 38],
                         self.body_font,
                     );
+                    if index == self.tools_tab {
+                        presentation_flag(button, "Jiks.Selected", true);
+                    }
                     a11y::annotate(
                         button,
                         &a11y::key("main.settings", "category", TOOL_KEYS[index]),
@@ -1952,7 +2631,7 @@ impl App {
                         (index == self.tools_tab).then(|| super::i18n::tr_static("当前页面")),
                     );
                 }
-                content_origin = 212 + nav_width + 20;
+                content_origin = 132 + nav_width + 20;
                 content_width = (width - nav_width - 20).max(250);
             }
             if self.page == Page::Dashboard {
@@ -1965,10 +2644,12 @@ impl App {
                     if column == 0 {
                         pair_y = bottoms[0].max(bottoms[1]);
                     }
-                    let mut group_y = pair_y;
-                    self.column_x = 212 + column as i32 * (width / columns as i32);
-                    let heading =
-                        self.label(&group.title, group_y, width / columns as i32 - 12, true, 28);
+                    let card_x = 132 + column as i32 * (width / columns as i32);
+                    let card_width = width / columns as i32 - 12;
+                    let card_top = pair_y;
+                    let mut group_y = card_top + 16;
+                    self.column_x = card_x + 16;
+                    let heading = self.label(&group.title, group_y, card_width - 32, true, 28);
                     if let Some(first) = group.metrics.first() {
                         a11y::annotate(
                             heading,
@@ -1977,28 +2658,19 @@ impl App {
                             None,
                         );
                     }
-                    group_y += 34;
+                    group_y += 38;
                     for metric in group.metrics {
-                        let h = self.label(
-                            &format!("{}    {}    {}", metric.label, metric.value, metric.detail),
-                            group_y,
-                            width / columns as i32 - 12,
-                            false,
-                            28,
-                        );
-                        a11y::annotate(
-                            h,
-                            &a11y::key("main.dashboard", "metric", &metric.key),
-                            None,
-                            None,
-                        );
-                        self.metrics.push((h, metric.key));
-                        group_y += 30;
+                        self.metric(&metric, group_y, card_width - 32);
+                        group_y += 36;
                     }
-                    bottoms[column] = group_y + 16;
+                    self.cards.push(CardSurface {
+                        icon: None,
+                        rect: [card_x, card_top, card_width, group_y - card_top + 10],
+                    });
+                    bottoms[column] = group_y + 26;
                 }
                 y = bottoms[0].max(bottoms[1]);
-                self.column_x = 212;
+                self.column_x = 132;
                 if self.metrics.is_empty()
                     && model
                         .documents
@@ -2011,30 +2683,56 @@ impl App {
                     y += 44;
                 }
             } else if self.page == Page::Battery {
+                let top = y;
+                self.column_x = 148;
                 for metric in model
                     .metrics
                     .iter()
                     .filter(|m| m.key.to_ascii_lowercase().starts_with("battery"))
                 {
-                    let h = self.label(
-                        &format!("{}    {}    {}", metric.label, metric.value, metric.detail),
-                        y,
-                        width,
-                        false,
-                        28,
-                    );
-                    a11y::annotate(
-                        h,
-                        &a11y::key("main.battery", "metric", &metric.key),
-                        None,
-                        None,
-                    );
-                    self.metrics.push((h, metric.key.clone()));
-                    y += 30;
+                    self.metric(metric, y + 16, width - 32);
+                    y += 36;
                 }
-                y += 16;
+                if y > top {
+                    self.cards.push(CardSurface {
+                        icon: None,
+                        rect: [132, top, width, y - top + 26],
+                    });
+                    y += 42;
+                }
+            } else if self.page == Page::About {
+                let top = y;
+                self.column_x = 152;
+                let name = self.label(
+                    &super::i18n::tr("机控 / Jiks"),
+                    y + 18,
+                    width - 40,
+                    true,
+                    34,
+                );
+                SendMessageW(name, WM_SETFONT, self.title_font as usize, 0);
+                let subtitle = self.label(
+                    &format!("{}  ·  {}", model.machine, model.version),
+                    y + 62,
+                    width - 40,
+                    false,
+                    26,
+                );
+                self.muted_labels.insert(subtitle as usize);
+                presentation_flag(subtitle, "Jiks.Muted", true);
+                self.label(
+                    &super::i18n::tr("Lenovo Legion Toolkit · Rust"),
+                    y + 98,
+                    width - 40,
+                    false,
+                    26,
+                );
+                self.cards.push(CardSurface {
+                    icon: None,
+                    rect: [132, top, width, 144],
+                });
+                y += 160;
             }
-            let row_height = if model.preferences.compact { 36 } else { 42 };
             let sections = catalog::sections(self.page, self.tools_tab, &model);
             let mut next_field = 1000u16;
             let mut next_button = 2000u16;
@@ -2049,15 +2747,16 @@ impl App {
                 } else {
                     full_width
                 };
-                self.column_x = content_origin + column as i32 * (width + 24);
+                let card_x = content_origin + column as i32 * (width + 24);
+                self.column_x = card_x + 16;
+                let width = width - 32;
                 if two_columns {
                     if column == 0 {
                         pair_y = bottoms[0].max(bottoms[1]);
                     }
                     y = pair_y;
                 }
-                let label_width = if width < 550 { 145 } else { 205 };
-                let editor_x = self.column_x + label_width + 12;
+                y += 8;
                 let section_key = section
                     .fields
                     .first()
@@ -2066,6 +2765,8 @@ impl App {
                     .unwrap_or_else(|| "content".into());
                 let section_scope = a11y::key(&self.accessibility_scope(), "section", &section_key);
                 let heading = self.label(&section.title, y, width, true, 30);
+                self.surface_children.remove(&(heading as usize));
+                presentation_flag(heading, "Jiks.Surface", false);
                 a11y::annotate(
                     heading,
                     &a11y::key(&section_scope, "text", "title"),
@@ -2073,15 +2774,39 @@ impl App {
                     None,
                 );
                 y += 38;
-                let hint = self.label(section.hint, y, width, false, 44);
+                let hint_height = if width < 440 { 52 } else { 38 };
+                let hint = self.label(section.hint, y, width, false, hint_height);
+                self.muted_labels.insert(hint as usize);
+                presentation_flag(hint, "Jiks.Muted", true);
+                self.surface_children.remove(&(hint as usize));
+                presentation_flag(hint, "Jiks.Surface", false);
                 a11y::annotate(
                     hint,
                     &a11y::key(&section_scope, "text", "description"),
                     None,
                     None,
                 );
-                y += 51;
+                y += hint_height + 12;
                 for spec in section.fields {
+                    let header_x = self.column_x;
+                    let row_top = y;
+                    let description = super::i18n::tr(super::presentation::field_hint(spec.key));
+                    let row_height = if description.is_empty() {
+                        if model.preferences.compact { 56 } else { 64 }
+                    } else if model.preferences.compact {
+                        72
+                    } else {
+                        80
+                    };
+                    let control_width = if matches!(spec.kind, FieldKind::Toggle) {
+                        48
+                    } else {
+                        (width * 38 / 100).clamp(130, 240)
+                    };
+                    let editor_x = card_x + 16 + width - control_width;
+                    self.column_x = card_x + 52;
+                    let label_width = (editor_x - self.column_x - 12).max(80);
+                    y = row_top + (row_height - 30) / 2;
                     let field_label = if let Some(range) = model.ranges.get(spec.key) {
                         format!(
                             "{} · {}–{} {}",
@@ -2090,7 +2815,23 @@ impl App {
                     } else {
                         spec.label.into()
                     };
-                    let label = self.label(&field_label, y + 6, label_width, false, 28);
+                    let label = self.label(
+                        &field_label,
+                        row_top
+                            + if description.is_empty() {
+                                (row_height - 28) / 2
+                            } else {
+                                12
+                            },
+                        label_width,
+                        false,
+                        28,
+                    );
+                    if !description.is_empty() {
+                        let hint = self.label(&description, row_top + 38, label_width, false, 34);
+                        self.muted_labels.insert(hint as usize);
+                        presentation_flag(hint, "Jiks.Muted", true);
+                    }
                     a11y::annotate(
                         label,
                         &a11y::key(&self.accessibility_scope(), "label", spec.key),
@@ -2106,7 +2847,7 @@ impl App {
                     next_field += 1;
                     let picker =
                         main_picker(spec.key).filter(|_| matches!(spec.kind, FieldKind::Text));
-                    let available_width = (width - label_width - 12).max(120);
+                    let available_width = control_width;
                     let editor_width =
                         (available_width - if picker.is_some() { 66 } else { 0 }).max(60);
                     let options = model.options.get(spec.key).cloned();
@@ -2265,13 +3006,30 @@ impl App {
                         );
                         self.pickers.insert(picker_id, (spec.key.into(), kind));
                     }
-                    y += row_height;
+                    self.cards.push(CardSurface {
+                        rect: [card_x, row_top, width + 32, row_height - 4],
+                        icon: Some(super::presentation::field_icon(spec.key)),
+                    });
+                    self.column_x = header_x;
+                    y = row_top + row_height + 4;
                 }
                 let mut x = self.column_x;
-                let mut unavailable = vec![];
+                let mut unavailable: BTreeMap<String, Vec<String>> = BTreeMap::new();
                 for action in section.actions {
-                    let button_width =
-                        ((action.label.chars().count() as i32 * 15) + 30).clamp(96, 230);
+                    let card_link = self.page == Page::Settings
+                        && matches!(
+                            action.kind,
+                            ActionKind::Document(_) | ActionKind::SensorSettings
+                        );
+                    let button_width = if card_link {
+                        width
+                    } else {
+                        ((action.label.chars().count() as i32 * 15) + 30).clamp(96, 230)
+                    };
+                    if card_link && x != self.column_x {
+                        x = self.column_x;
+                        y += 42;
+                    }
                     if x + button_width > self.column_x + width {
                         x = self.column_x;
                         y += 42;
@@ -2283,9 +3041,12 @@ impl App {
                         action.label,
                         BS_OWNERDRAW as u32 | WS_TABSTOP,
                         id,
-                        [x, y + 6, button_width, 32],
+                        [x, y + 6, button_width, if card_link { 48 } else { 32 }],
                         self.body_font,
                     );
+                    if card_link {
+                        presentation_flag(h, "Jiks.ActionCard", true);
+                    }
                     let available = action.capability.is_empty() || model.can(action.capability);
                     a11y::annotate(
                         h,
@@ -2298,28 +3059,33 @@ impl App {
                     EnableWindow(h, available as i32);
                     if !available {
                         let reason = model.unavailable_reason(action.capability);
-                        let line = format!("{}：{}", action.label, reason);
-                        if !unavailable.contains(&line) {
-                            unavailable.push(line);
-                        }
+                        unavailable
+                            .entry(reason)
+                            .or_default()
+                            .push(action.label.to_owned());
                     }
                     self.buttons.insert(id, action);
-                    x += button_width + 10;
+                    if card_link {
+                        x = self.column_x;
+                        y += 56;
+                    } else {
+                        x += button_width + 10;
+                    }
                 }
                 y += 52;
-                for reason in unavailable {
-                    self.label(&reason, y, width, false, 30);
-                    y += 32;
+                for (reason, actions) in unavailable {
+                    let h = self.label(
+                        &format!("{}：{}", actions.join("、"), reason),
+                        y,
+                        width,
+                        false,
+                        52,
+                    );
+                    presentation_flag(h, "Jiks.Surface", false);
+                    presentation_flag(h, "Jiks.Muted", true);
+                    y += 56;
                 }
-                self.placed(
-                    "STATIC",
-                    "",
-                    SS_ETCHEDHORZ as u32,
-                    0,
-                    [self.column_x, y + 8, width, 1],
-                    self.body_font,
-                );
-                y += 35;
+                y += 20;
                 if two_columns {
                     bottoms[column] = y;
                 }
@@ -2327,7 +3093,7 @@ impl App {
             if two_columns {
                 y = bottoms[0].max(bottoms[1]);
             }
-            self.column_x = 212;
+            self.column_x = 132;
             self.content_height = y;
             self.position_content();
             self.layout_fixed();
@@ -2350,6 +3116,8 @@ impl App {
                 a11y::diagnostic().as_deref().unwrap_or(&model.notice),
             );
             InvalidateRect(self.hwnd, null(), 1);
+            #[cfg(debug_assertions)]
+            super::capture_fixture::queue(self.hwnd, &self.bridge, &self.accessibility_scope());
         }
     }
     unsafe fn position_content(&mut self) {
@@ -2380,9 +3148,11 @@ impl App {
                     self.s(r[3]),
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 );
-                let visible = y >= 114 && y + p.clip_height <= height - 58;
+                let visible =
+                    clip_to_viewport(p.hwnd, y, r[2], p.clip_height, 114, height - 58, self.dpi);
                 ShowWindow(p.hwnd, if visible { SW_SHOWNA } else { SW_HIDE });
             }
+            InvalidateRect(self.hwnd, null(), 0);
         }
     }
     unsafe fn capture(&mut self) {
@@ -2439,6 +3209,14 @@ impl App {
                 return;
             }
             if id == ID_EXIT {
+                self.bridge
+                    .diagnostics
+                    .main_exit_invocations
+                    .fetch_add(1, Ordering::Relaxed);
+                self.bridge
+                    .diagnostics
+                    .last_exit_origin
+                    .store(2, Ordering::Relaxed);
                 self.shutdown();
                 return;
             }
@@ -2684,6 +3462,14 @@ impl App {
                     .is_some_and(|after| self.started.elapsed() >= after)
             {
                 self.smoke_submitted = true;
+                self.bridge
+                    .diagnostics
+                    .smoke_deadline_exits
+                    .fetch_add(1, Ordering::Relaxed);
+                self.bridge
+                    .diagnostics
+                    .last_exit_origin
+                    .store(4, Ordering::Relaxed);
                 self.shutdown();
             }
             if self.bridge.smoke_exercise_reentrancy && !self.smoke_submitted && !self.modal_active
@@ -2867,6 +3653,11 @@ impl App {
             ) {
                 text(self.notice, &error);
             }
+            let has_background = self.background.visible();
+            if (!GetPropW(self.hwnd, wide("Jiks.Background").as_ptr()).is_null()) != has_background
+            {
+                presentation_flag(self.hwnd, "Jiks.Background", has_background);
+            }
             if self.background.take_dirty() {
                 InvalidateRect(self.hwnd, null(), 1);
             }
@@ -2898,7 +3689,9 @@ impl App {
             }
             if apply_palette(&model) {
                 DeleteObject(self.brush);
+                DeleteObject(self.surface_brush);
                 self.brush = CreateSolidBrush(paper());
+                self.surface_brush = CreateSolidBrush(surface());
                 RedrawWindow(
                     self.hwnd,
                     null(),
@@ -2946,12 +3739,29 @@ impl App {
                 if self.pending.is_empty() {
                     text(self.notice, &model.notice);
                 }
-                for (hwnd, key) in &self.metrics {
-                    if let Some(metric) = model.metrics.iter().find(|m| m.key == *key) {
-                        let value =
-                            format!("{}    {}    {}", metric.label, metric.value, metric.detail);
-                        if get_text(*hwnd) != value {
-                            text(*hwnd, &value);
+                for placed in &self.metrics {
+                    if let Some(metric) = model.metrics.iter().find(|m| m.key == placed.key) {
+                        let mut changed = false;
+                        for (hwnd, value) in [
+                            (placed.name, &metric.label),
+                            (placed.value, &metric.value),
+                            (placed.detail, &metric.detail),
+                        ] {
+                            if get_text(hwnd) != *value {
+                                text(hwnd, value);
+                                changed = true;
+                            }
+                        }
+                        if changed {
+                            a11y::annotate(
+                                placed.value,
+                                &a11y::key(&self.accessibility_scope(), "metric", &metric.key),
+                                Some(&format!(
+                                    "{} {} {}",
+                                    metric.label, metric.value, metric.detail
+                                )),
+                                None,
+                            );
                         }
                     }
                 }
@@ -3108,6 +3918,14 @@ impl App {
                     let close = *close;
                     self.pending_ui_ack = None;
                     if close {
+                        self.bridge
+                            .diagnostics
+                            .ui_effect_exits
+                            .fetch_add(1, Ordering::Relaxed);
+                        self.bridge
+                            .diagnostics
+                            .last_exit_origin
+                            .store(5, Ordering::Relaxed);
                         self.shutdown();
                     }
                 }
@@ -3407,6 +4225,14 @@ impl App {
             } else if command == ID_TRAY_OPEN {
                 self.foreground();
             } else if command == ID_TRAY_EXIT {
+                self.bridge
+                    .diagnostics
+                    .tray_exit_invocations
+                    .fetch_add(1, Ordering::Relaxed);
+                self.bridge
+                    .diagnostics
+                    .last_exit_origin
+                    .store(3, Ordering::Relaxed);
                 self.shutdown();
             } else if command == ID_TRAY_STATUS {
                 self.show_status_popup(true);
@@ -3531,5 +4357,298 @@ unsafe fn copy_wide<const N: usize>(dest: &mut [u16; N], source: &str) {
     dest.fill(0);
     for (d, s) in dest.iter_mut().take(N - 1).zip(source.encode_utf16()) {
         *d = s;
+    }
+}
+
+#[cfg(test)]
+mod presentation_regression_tests {
+    use super::*;
+    #[test]
+    fn native_static_print_uses_solid_surface_and_muted_text_from_the_parent() {
+        unsafe extern "system" fn parent_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> isize {
+            unsafe {
+                presentation_message(msg, wp, lp)
+                    .unwrap_or_else(|| DefWindowProcW(hwnd, msg, wp, lp))
+            }
+        }
+        unsafe {
+            let class = wide("Jiks.Test.Presentation.StaticPrint");
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(parent_proc),
+                hInstance: GetModuleHandleW(null()),
+                lpszClassName: class.as_ptr(),
+                ..zeroed()
+            };
+            assert_ne!(RegisterClassW(&wc), 0);
+            let parent = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                400,
+                200,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null(),
+            );
+            let body_font = font(96, 14, false);
+            let label = create(
+                parent,
+                "STATIC",
+                "Synthetic caption",
+                0,
+                1000,
+                [10, 10, 240, 40],
+                body_font,
+            );
+            presentation_flag(label, "Jiks.Surface", true);
+            presentation_flag(label, "Jiks.Muted", true);
+            let screen = GetDC(null_mut());
+            let dc = CreateCompatibleDC(screen);
+            let bitmap = CreateCompatibleBitmap(screen, 240, 40);
+            ReleaseDC(null_mut(), screen);
+            let old_bitmap = SelectObject(dc, bitmap);
+            fill(
+                dc,
+                &RECT {
+                    left: 0,
+                    top: 0,
+                    right: 240,
+                    bottom: 40,
+                },
+                0x000000ff,
+            );
+            SendMessageW(
+                label,
+                WM_PRINTCLIENT,
+                dc as usize,
+                (PRF_CLIENT | PRF_ERASEBKGND) as isize,
+            );
+            assert_eq!(GetPixel(dc, 239, 39), surface());
+            let mut darkest = 255;
+            for y in 0..25 {
+                for x in 0..200 {
+                    let color = GetPixel(dc, x, y);
+                    darkest = darkest.min(color & 255);
+                }
+            }
+            assert!(
+                darkest >= 0x60 && darkest < 0xc0,
+                "muted text should be gray rather than primary ink: {darkest}"
+            );
+            fill(
+                dc,
+                &RECT {
+                    left: 0,
+                    top: 0,
+                    right: 240,
+                    bottom: 40,
+                },
+                0x000000ff,
+            );
+            let region = CreateRectRgn(0, 5, 100, 25);
+            assert_ne!(SetWindowRgn(label, region, 0), 0);
+            SetViewportOrgEx(dc, 20, 10, null_mut());
+            SendMessageW(
+                label,
+                WM_PRINTCLIENT,
+                dc as usize,
+                (PRF_CLIENT | PRF_ERASEBKGND) as isize,
+            );
+            SetViewportOrgEx(dc, 0, 0, null_mut());
+            assert_eq!(
+                GetPixel(dc, 115, 33),
+                surface(),
+                "window-local print clip follows the DC viewport"
+            );
+            assert_eq!(
+                GetPixel(dc, 115, 12),
+                0x000000ff,
+                "pixels before the clipped top remain untouched"
+            );
+            assert_eq!(
+                GetPixel(dc, 125, 33),
+                0x000000ff,
+                "pixels after the clipped right remain untouched"
+            );
+            SelectObject(dc, old_bitmap);
+            DeleteObject(bitmap);
+            DeleteDC(dc);
+            assert_eq!(IsWindowVisible(parent), 0);
+            DestroyWindow(parent);
+            DeleteObject(body_font);
+            UnregisterClassW(class.as_ptr(), GetModuleHandleW(null()));
+        }
+    }
+    #[test]
+    fn tall_controls_remain_partly_visible_at_both_viewport_edges() {
+        unsafe {
+            let parent = CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                400,
+                400,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null(),
+            );
+            let child = CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_CHILD,
+                0,
+                0,
+                240,
+                136,
+                parent,
+                null_mut(),
+                GetModuleHandleW(null()),
+                null(),
+            );
+            let region = CreateRectRgn(0, 0, 0, 0);
+            assert!(clip_to_viewport(child, 150, 240, 136, 90, 255, 96));
+            assert_ne!(GetWindowRgn(child, region), ERROR);
+            let mut bounds: RECT = zeroed();
+            GetRgnBox(region, &mut bounds);
+            assert_eq!((bounds.top, bounds.bottom), (0, 105));
+            assert!(clip_to_viewport(child, 86, 240, 136, 90, 255, 96));
+            GetWindowRgn(child, region);
+            GetRgnBox(region, &mut bounds);
+            assert_eq!((bounds.top, bounds.bottom), (4, 136));
+            assert!(!clip_to_viewport(child, 300, 240, 136, 90, 255, 96));
+            DeleteObject(region);
+            DestroyWindow(parent);
+        }
+    }
+    #[test]
+    fn switch_paint_preserves_native_toggle_state_keyboard_contract_and_caption() {
+        let _accessibility = a11y::UiThread::enter().unwrap();
+        unsafe {
+            let parent = CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                wide("Synthetic never-visible presentation").as_ptr(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                400,
+                200,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null(),
+            );
+            assert!(!parent.is_null());
+            let body_font = font(96, 14, false);
+            let toggle = create(
+                parent,
+                "BUTTON",
+                "Synthetic caption",
+                BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+                1000,
+                [10, 10, 240, 32],
+                body_font,
+            );
+            presentation_flag(toggle, "Jiks.Surface", true);
+            a11y::annotate(toggle, "synthetic.toggle", None, None);
+            SendMessageW(toggle, BM_SETCHECK, BST_UNCHECKED as usize, 0);
+            let before = a11y::read_for_test(&[toggle]).unwrap();
+            assert_eq!(before[0].toggle, Some(0));
+            SendMessageW(toggle, BM_CLICK, 0, 0);
+            assert_eq!(
+                SendMessageW(toggle, BM_GETCHECK, 0, 0),
+                BST_CHECKED as isize
+            );
+            let after = a11y::read_for_test(&[toggle]).unwrap();
+            assert_eq!(after[0].toggle, Some(1));
+            assert_eq!(after[0].name, "Synthetic caption");
+            assert_eq!(
+                after[0].control_type,
+                windows::Win32::UI::Accessibility::UIA_CheckBoxControlTypeId.0
+            );
+            let dc = CreateCompatibleDC(null_mut());
+            SetTextColor(dc, 0x00123456);
+            SetBkMode(dc, OPAQUE as i32);
+            SendMessageW(toggle, WM_PRINTCLIENT, dc as usize, PRF_CLIENT as isize);
+            assert_eq!(GetTextColor(dc), 0x00123456);
+            assert_eq!(GetBkMode(dc), OPAQUE as i32);
+            assert_eq!(IsWindowVisible(parent), 0);
+            DeleteDC(dc);
+            DestroyWindow(parent);
+            DeleteObject(body_font);
+        }
+    }
+    #[test]
+    fn owner_draw_preserves_the_callers_dc_and_color_queries_need_no_app_borrow() {
+        unsafe {
+            let parent = CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                300,
+                200,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null(),
+            );
+            let body_font = font(96, 14, false);
+            let button = create(
+                parent,
+                "BUTTON",
+                "Synthetic action",
+                BS_OWNERDRAW as u32,
+                2000,
+                [10, 10, 200, 32],
+                body_font,
+            );
+            presentation_flag(button, "Jiks.Surface", true);
+            presentation_flag(button, "Jiks.Muted", true);
+            let dc = CreateCompatibleDC(null_mut());
+            assert!(presentation_message(WM_CTLCOLORBTN, dc as usize, button as isize).is_some());
+            assert_eq!(GetBkColor(dc), surface());
+            assert_eq!(GetTextColor(dc), muted());
+            let app_state = RefCell::new(());
+            let _layout_borrow = app_state.borrow_mut();
+            for primary in [false, true] {
+                presentation_flag(button, "Jiks.Primary", primary);
+                SetTextColor(dc, 0x00654321);
+                SetBkMode(dc, OPAQUE as i32);
+                let item = DRAWITEMSTRUCT {
+                    CtlID: 2000,
+                    hwndItem: button,
+                    hDC: dc,
+                    rcItem: RECT {
+                        left: 0,
+                        top: 0,
+                        right: 200,
+                        bottom: 32,
+                    },
+                    ..zeroed()
+                };
+                assert_eq!(
+                    presentation_message(WM_DRAWITEM, 2000, &item as *const _ as isize),
+                    Some(1)
+                );
+                assert_eq!(GetTextColor(dc), 0x00654321);
+                assert_eq!(GetBkMode(dc), OPAQUE as i32);
+            }
+            assert_eq!(IsWindowVisible(parent), 0);
+            DeleteDC(dc);
+            DestroyWindow(parent);
+            DeleteObject(body_font);
+        }
     }
 }

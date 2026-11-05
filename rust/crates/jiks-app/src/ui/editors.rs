@@ -24,7 +24,7 @@ use crate::ui_model::*;
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::Ordering;
@@ -304,6 +304,9 @@ struct Editor {
     font: HFONT,
     heading: HFONT,
     brush: HBRUSH,
+    surface_brush: HBRUSH,
+    cards: Vec<[i32; 4]>,
+    surface_children: BTreeSet<usize>,
     data: Value,
     drafts: BTreeMap<String, Value>,
     edits: Vec<Edit>,
@@ -526,9 +529,12 @@ fn open(parent: HWND, bridge: UiBridge, mode: Mode, data: Value) -> Result<()> {
             hwnd: null_mut(),
             mode,
             dpi,
-            font: font(dpi, 15, false),
-            heading: font(dpi, 21, true),
+            font: font(dpi, 14, false),
+            heading: font(dpi, 20, true),
             brush,
+            surface_brush: CreateSolidBrush(surface()),
+            cards: vec![],
+            surface_children: BTreeSet::new(),
             data,
             drafts: BTreeMap::new(),
             edits: vec![],
@@ -624,6 +630,10 @@ fn open(parent: HWND, bridge: UiBridge, mode: Mode, data: Value) -> Result<()> {
                 }
                 break;
             }
+            #[cfg(debug_assertions)]
+            if super::capture_fixture::consume(&msg) {
+                continue;
+            }
             if IsDialogMessageW(hwnd, &msg) == 0 {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -644,6 +654,7 @@ impl Drop for Editor {
             DeleteObject(self.font);
             DeleteObject(self.heading);
             DeleteObject(self.brush);
+            DeleteObject(self.surface_brush);
         }
     }
 }
@@ -667,6 +678,9 @@ unsafe extern "system" fn editor_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize
         let raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut RefCell<Editor>;
         if raw.is_null() {
             return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+        if let Some(result) = presentation_message(msg, wp, lp) {
+            return result;
         }
         let (mut result, destroy, picker, confirmed_submit) = {
             let Ok(mut editor) = (*raw).try_borrow_mut() else {
@@ -995,7 +1009,12 @@ unsafe fn editor_message(e: &mut Editor, msg: u32, wp: usize, lp: isize) -> Opti
                 Some(0)
             }
             WM_DRAWITEM => {
-                paint_button(&*(lp as *const DRAWITEMSTRUCT), false);
+                let item = &*(lp as *const DRAWITEMSTRUCT);
+                if item.CtlID == SAVE as u32 {
+                    paint_primary_button(item);
+                } else {
+                    paint_button(item, false);
+                }
                 Some(1)
             }
             WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
@@ -1008,14 +1027,27 @@ unsafe fn editor_message(e: &mut Editor, msg: u32, wp: usize, lp: isize) -> Opti
                     },
                 );
                 SetBkMode(wp as HDC, TRANSPARENT as i32);
-                SetBkColor(wp as HDC, paper());
-                Some(e.brush as isize)
+                let on_surface = e.surface_children.contains(&(lp as usize));
+                SetBkColor(wp as HDC, if on_surface { surface() } else { paper() });
+                Some((if on_surface { e.surface_brush } else { e.brush }) as isize)
             }
             WM_ERASEBKGND => {
                 let mut rect: RECT = zeroed();
                 GetClientRect(e.hwnd, &mut rect);
                 FillRect(wp as HDC, &rect, e.brush);
+                e.paint_cards(wp as HDC);
                 Some(1)
+            }
+            WM_PAINT => {
+                let mut ps: PAINTSTRUCT = zeroed();
+                let dc = BeginPaint(e.hwnd, &mut ps);
+                e.paint_cards(dc);
+                EndPaint(e.hwnd, &ps);
+                Some(0)
+            }
+            WM_PRINTCLIENT => {
+                e.paint_cards(wp as HDC);
+                Some(0)
             }
             WM_CLOSE => {
                 e.close();
@@ -1035,6 +1067,38 @@ unsafe fn editor_message(e: &mut Editor, msg: u32, wp: usize, lp: isize) -> Opti
 }
 
 impl Editor {
+    unsafe fn paint_cards(&self, dc: HDC) {
+        unsafe {
+            let (width, height) = self.size();
+            let saved = SaveDC(dc);
+            let mut rect: RECT = zeroed();
+            GetClientRect(self.hwnd, &mut rect);
+            FillRect(dc, &rect, self.brush);
+            IntersectClipRect(dc, 0, self.s(12), self.s(width), self.s(height - 94));
+            for [x, y, w, h] in &self.cards {
+                let y = *y - self.scroll;
+                if y + h > 12 && y < height - 94 {
+                    paint_card(
+                        dc,
+                        &RECT {
+                            left: self.s(*x),
+                            top: self.s(y),
+                            right: self.s(x + w),
+                            bottom: self.s(y + h),
+                        },
+                        self.dpi,
+                    );
+                }
+            }
+            RestoreDC(dc, saved);
+            let pen = CreatePen(PS_SOLID, 1, line());
+            let old = SelectObject(dc, pen);
+            MoveToEx(dc, self.s(20), self.s(height - 90), null_mut());
+            LineTo(dc, self.s(width - 20), self.s(height - 90));
+            SelectObject(dc, old);
+            DeleteObject(pen);
+        }
+    }
     fn s(&self, v: i32) -> i32 {
         v * self.dpi as i32 / 96
     }
@@ -1375,6 +1439,12 @@ impl Editor {
     }
     unsafe fn input(&mut self, key: &str, label: &str, kind: Kind, y: i32, width: i32) -> HWND {
         unsafe {
+            let first_placement = self.placements.len();
+            let row_height = match &kind {
+                Kind::Lines => 140,
+                Kind::MultiChoice(_) => 168,
+                _ => 38,
+            };
             let editor_x = if width < 650 { 205 } else { 240 };
             let label_hwnd = self.label(label, y + 3, editor_x - 40, 34, false);
             a11y::annotate(
@@ -1519,6 +1589,12 @@ impl Editor {
                 hwnd: h,
                 kind,
             });
+            self.cards
+                .push([12, y + self.layout_extra - 4, width + 16, row_height]);
+            for placed in &self.placements[first_placement..] {
+                self.surface_children.insert(placed.hwnd as usize);
+                presentation_flag(placed.hwnd, "Jiks.Surface", true);
+            }
             h
         }
     }
@@ -1536,6 +1612,8 @@ impl Editor {
             self.picker_buttons.clear();
             self.sliders.clear();
             self.body_buttons.clear();
+            self.cards.clear();
+            self.surface_children.clear();
             for h in [self.status, self.save, self.cancel] {
                 if !h.is_null() {
                     DestroyWindow(h);
@@ -1724,6 +1802,8 @@ impl Editor {
                 ],
                 self.font,
             );
+            presentation_flag(self.save, "Jiks.Primary", true);
+            presentation_flag(self.status, "Jiks.Muted", true);
             a11y::annotate(
                 self.save,
                 &a11y::key(&self.mode.accessibility_key(), "action", "save"),
@@ -1824,6 +1904,8 @@ impl Editor {
             }
             self.position();
             self.rendering = false;
+            #[cfg(debug_assertions)]
+            super::capture_fixture::queue(self.hwnd, &self.bridge, &self.mode.accessibility_key());
         }
     }
     fn save_capability(&self) -> &'static str {
@@ -1871,13 +1953,14 @@ impl Editor {
                 );
                 ShowWindow(
                     p.hwnd,
-                    if y >= 12 && y + p.clip_height <= height - 94 {
+                    if clip_to_viewport(p.hwnd, y, r[2], p.clip_height, 12, height - 94, self.dpi) {
                         SW_SHOWNA
                     } else {
                         SW_HIDE
                     },
                 );
             }
+            InvalidateRect(self.hwnd, null(), 0);
         }
     }
     unsafe fn capture(&mut self) {

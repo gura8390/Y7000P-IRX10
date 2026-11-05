@@ -144,7 +144,7 @@ fn smoke_ui(seconds: u64, exercise_reentrancy: bool) -> Result<()> {
             ("sensors.voltage_mode", json!("average")),
             ("sensors.voltage_core", json!(0)),
             ("sensors.gpu", json!("discrete")),
-            ("sensors.memory_mode", json!("gb")),
+            ("sensors.memory_mode", json!("gigabytes")),
             ("osd.visible", json!(true)),
             ("osd.enabled", json!(true)),
         ] {
@@ -193,7 +193,22 @@ fn smoke_ui(seconds: u64, exercise_reentrancy: bool) -> Result<()> {
             detail: "隔离固定样本，非本机采样".into(),
         })
         .collect();
-        let groups=["处理器","显卡","内存","磁盘","显示器","主板","网络","操作系统","电池","固件","机型"].into_iter().map(|title|json!({"title":title,"rows":[{"label":"信息","value":"确定性界面样本，非实机查询"}]})).collect::<Vec<_>>();
+        let groups = [
+            ("cpu", "处理器", vec![("处理器", "Intel Core i9-14900HX · 24 核心 / 32 线程", false), ("信息", "确定性界面样本，非实机查询", false)]),
+            ("gpu", "显卡", vec![("独立显卡", "NVIDIA GeForce RTX 5060 Laptop GPU · 8 GB", false), ("集成显卡", "Intel UHD Graphics", false), ("信息", "确定性界面样本，非实机查询", false)]),
+            ("memory", "内存", vec![("物理内存", "16 GB DDR5-5600 · 1 个插槽已使用", false), ("模块序列号", "FIXTURE-MEMORY-0001", true), ("信息", "确定性界面样本，非实机查询", false)]),
+            ("disks", "磁盘", vec![("磁盘 1", "NVMe 固态硬盘 · 1 TB · PCIe 4.0 x4", false), ("磁盘 2", "NVMe 固态硬盘 · 2 TB · PCIe 4.0 x4", false), ("序列号", "FIXTURE-DISK-0001", true), ("信息", "确定性界面样本，非实机查询", false)]),
+            ("display", "显示器", vec![("内置显示器", "2560 × 1600 · 165 Hz · 150% 缩放", false), ("信息", "确定性界面样本，非实机查询", false)]),
+            ("motherboard", "主板", vec![("制造商", "LENOVO", false), ("型号", "83NN · Y7000P IRX10", false), ("信息", "确定性界面样本，非实机查询", false)]),
+            ("network", "网络", vec![("无线网卡", "Intel Wi-Fi 6E · 布局长文本与自动换行检查", false), ("MAC 地址", "00-00-00-00-00-01", true), ("信息", "确定性界面样本，非实机查询", false)]),
+            ("os", "操作系统", vec![("系统", "Windows 11 家庭中文版 · 64 位", false), ("信息", "确定性界面样本，非实机查询", false)]),
+            ("battery", "电池", vec![("状态", "已连接电源 · 80%", false), ("设计容量", "80 Wh", false), ("信息", "确定性界面样本，非实机查询", false)]),
+            ("bios", "固件", vec![("BIOS", "S9CN15WW · UEFI", false), ("信息", "确定性界面样本，非实机查询", false)]),
+            ("device", "机型", vec![("产品", "Lenovo Y7000P IRX10 · 83NN", false), ("序列号", "FIXTURE-DEVICE-0001", true), ("信息", "确定性界面样本，非实机查询", false)]),
+        ]
+        .into_iter()
+        .map(|(id, title, rows)| json!({"id":id,"title":title,"rows":rows.into_iter().map(|(label,value,sensitive)|json!({"label":label,"value":value,"sensitive":sensitive})).collect::<Vec<_>>()}))
+        .collect::<Vec<_>>();
         state.collections.insert(
             "device.information".into(),
             vec![UiItem {
@@ -220,6 +235,10 @@ fn smoke_ui(seconds: u64, exercise_reentrancy: bool) -> Result<()> {
     let mut bridge =
         UiBridge::new(model, send).with_smoke_close_after(std::time::Duration::from_secs(seconds));
     bridge.smoke_exercise_reentrancy = exercise_reentrancy;
+    #[cfg(debug_assertions)]
+    if !exercise_reentrancy {
+        bridge.layout_capture_dir = std::env::var_os("JIKS_UI_CAPTURE_DIR").map(std::path::PathBuf::from);
+    }
     let result = ui::run(bridge);
     let _ = consumer.join();
     result

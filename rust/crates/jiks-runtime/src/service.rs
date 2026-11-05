@@ -163,6 +163,12 @@ impl RuntimeHandle {
     pub fn snapshot(&self) -> Snapshot {
         self.state.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
+    /// The broker monitor still checks transport health on its own deadline,
+    /// but unchanged state need not allocate/copy every live value and result.
+    pub fn snapshot_if_changed(&self, observed_revision: u64) -> Option<Snapshot> {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        (state.revision != observed_revision).then(|| state.clone())
+    }
     pub fn submit(&self, command: Command) -> Result<()> {
         self.commands
             .try_send(command)
@@ -206,6 +212,19 @@ pub fn start(data_root: PathBuf, read_only: bool) -> Result<RuntimeHandle> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn revision_poll_skips_unchanged_state_and_never_hides_results() {
+        let state = Arc::new(Mutex::new(Snapshot::default()));
+        let (commands, _receiver) = mpsc::sync_channel(1);
+        let runtime = RuntimeHandle { state, commands };
+        let initial = runtime.snapshot_if_changed(0).unwrap();
+        assert!(runtime.snapshot_if_changed(initial.revision).is_none());
+        runtime.report(12, false, "operation failed".into());
+        let next = runtime.snapshot_if_changed(initial.revision).unwrap();
+        assert_eq!(next.results.back().unwrap().request_id, 12);
+        assert_eq!(next.notice, "operation failed");
+        assert!(runtime.snapshot_if_changed(next.revision).is_none());
+    }
     #[test]
     fn large_static_documents_are_shared_between_snapshots() {
         let mut snapshot = Snapshot::default();

@@ -17,8 +17,8 @@ builds use asInvoker. A permission failure means the capability could not be
 verified, rather than that the hardware is absent. Temperature/load acceptance
 belongs to the user; isolated tests do not establish firmware acceptance.
 
-The interface uses an installed 方正公文楷体 / FZGWKai font when available and
-falls back to Windows fonts. No proprietary font binary is redistributed.
+The interface uses Windows UI fonts, preferring Microsoft YaHei UI and falling
+back to Segoe UI. No font binary is redistributed.
 
 The application is GPL-3.0-only. Included notices describe the separately
 licensed PawnIO IntelMSR, SmbusI801 and SmbusIntelSkylakeIMC modules embedded in

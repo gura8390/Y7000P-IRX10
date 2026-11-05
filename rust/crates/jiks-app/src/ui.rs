@@ -2,12 +2,15 @@
 mod background;
 mod a11y;
 mod catalog;
+#[cfg(debug_assertions)]
+mod capture_fixture;
 mod device_information;
 mod editors;
 mod i18n;
 mod native;
 mod notifications;
 mod overlay;
+mod presentation;
 mod selectors;
 mod sensors;
 mod status_popup;

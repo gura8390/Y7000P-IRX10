@@ -1,7 +1,7 @@
 use crate::{ui, ui_model::*};
 use anyhow::{Context, Result, bail};
 use jiks_runtime::{
-    ipc::BrokerClient,
+    ipc::{BrokerClient, SnapshotCursor},
     service::{Command, Snapshot},
 };
 use serde_json::json;
@@ -16,6 +16,7 @@ pub struct Options {
     pub read_only: bool,
     close_after: Option<Duration>,
     benchmark_log: Option<PathBuf>,
+    benchmark_lifecycle_only: bool,
     minimized: bool,
 }
 impl Options {
@@ -26,6 +27,7 @@ impl Options {
             read_only: false,
             close_after: None,
             benchmark_log: None,
+            benchmark_lifecycle_only: false,
             minimized: false,
         };
         let mut args = arguments.iter();
@@ -46,6 +48,7 @@ impl Options {
                         args.next().context("--benchmark-log需要路径")?,
                     ));
                 }
+                "--benchmark-lifecycle-only" => options.benchmark_lifecycle_only = true,
                 _ => bail!("未知参数 {argument}；可用 doctor、ui-smoke、--read-only、--data-dir"),
             }
         }
@@ -56,6 +59,9 @@ impl Options {
         options.read_only |= saved.read_only;
         if options.close_after.is_some() && !options.read_only {
             bail!("定时退出测试仅允许只读运行");
+        }
+        if options.benchmark_lifecycle_only && options.benchmark_log.is_none() {
+            bail!("--benchmark-lifecycle-only需要显式--benchmark-log路径");
         }
         Ok(options)
     }
@@ -79,29 +85,48 @@ pub fn run(options: Options) -> Result<()> {
     let (window_signal, window_ready) = mpsc::channel();
     let thread_client = client.clone();
     let thread_model = model.clone();
+    let diagnostics = Arc::new(UiDiagnostics::default());
+    let thread_diagnostics = diagnostics.clone();
     let mut benchmark_path = options.benchmark_log.clone();
     let worker = std::thread::Builder::new()
         .name("jiks-ui-bridge".into())
         .spawn(move || -> Result<()> {
-            let mut revision = 0;
+            let mut snapshot_cursor = SnapshotCursor::default();
+            let mut snapshot = Snapshot::default();
             let mut backend_ready_ms = None;
             let mut window_ready_ms = None;
             let mut output_last = Instant::now();
+            let mut last_milestone = None;
+            let mut last_ui_action = "none";
             loop {
                 if window_ready_ms.is_none() && window_ready.try_recv().is_ok() {
                     window_ready_ms = Some(start.elapsed().as_secs_f64() * 1000.);
                 }
-                let snapshot = thread_client.snapshot();
+                if let Some(updated) = thread_client.snapshot_if_changed(&mut snapshot_cursor) {
+                    snapshot = updated;
+                    let mut model = thread_model.lock().unwrap_or_else(|p| p.into_inner());
+                    apply_snapshot(&mut model, &snapshot);
+                }
                 if snapshot.backend_ready && backend_ready_ms.is_none() {
                     backend_ready_ms = Some(start.elapsed().as_secs_f64() * 1000.);
                 }
-                if snapshot.revision != revision {
-                    let mut model = thread_model.lock().unwrap_or_else(|p| p.into_inner());
-                    apply_snapshot(&mut model, &snapshot);
-                    revision = snapshot.revision;
-                }
+                let milestone = (
+                    window_ready_ms.is_some(),
+                    snapshot.backend_ready,
+                    snapshot.shutdown_ready,
+                    snapshot.values.contains_key("backend.terminal_error"),
+                    snapshot.values.contains_key("backend.connection_failed"),
+                    !snapshot.metrics.is_empty(),
+                    boolean(&snapshot, "sensors.enabled", false),
+                    boolean(&snapshot, "thermal.active", false),
+                    boolean(&snapshot, "thermal.shadow", false),
+                );
                 if let Some(path) = &benchmark_path
-                    && output_last.elapsed() >= Duration::from_secs(1)
+                    && if options.benchmark_lifecycle_only {
+                        last_milestone != Some(milestone)
+                    } else {
+                        output_last.elapsed() >= Duration::from_secs(1)
+                    }
                 {
                     let record = benchmark_record(
                         &snapshot,
@@ -111,6 +136,9 @@ pub fn run(options: Options) -> Result<()> {
                         window_ready_ms,
                         backend_ready_ms,
                         false,
+                        &thread_diagnostics,
+                        last_ui_action,
+                        options.benchmark_lifecycle_only,
                     );
                     match serde_json::to_vec_pretty(&record)
                         .map_err(anyhow::Error::from)
@@ -130,9 +158,15 @@ pub fn run(options: Options) -> Result<()> {
                         }
                     }
                     output_last = Instant::now();
+                    last_milestone = Some(milestone);
                 }
                 match receiver.recv_timeout(Duration::from_millis(80)) {
                     Ok(action) => {
+                        last_ui_action = match &action {
+                            UiAction::Execute { .. } => "execute",
+                            UiAction::SaveDocument { .. } => "save_document",
+                            UiAction::Shutdown { .. } => "shutdown",
+                        };
                         let id = action.request_id();
                         if let UiAction::Execute {
                             command, payload, ..
@@ -185,6 +219,9 @@ pub fn run(options: Options) -> Result<()> {
                         if !snapshot.shutdown_ready {
                             thread_client.submit(Command::Shutdown { request_id: 0 })?;
                         }
+                        if last_ui_action != "shutdown" {
+                            last_ui_action = "ui_channel_disconnected";
+                        }
                         break;
                     }
                 }
@@ -199,6 +236,9 @@ pub fn run(options: Options) -> Result<()> {
                     window_ready_ms,
                     backend_ready_ms,
                     true,
+                    &thread_diagnostics,
+                    last_ui_action,
+                    options.benchmark_lifecycle_only,
                 );
                 if let Ok(bytes) = serde_json::to_vec_pretty(&record) {
                     let _ = std::fs::write(path, bytes);
@@ -209,6 +249,7 @@ pub fn run(options: Options) -> Result<()> {
             Ok(())
         })?;
     let mut bridge = UiBridge::new(model, actions);
+    bridge.diagnostics = diagnostics.clone();
     bridge.instance_key = Some(instance_key);
     bridge.startup_language_prompt = !options.read_only;
     bridge.start_minimized = options.minimized;
@@ -221,6 +262,22 @@ pub fn run(options: Options) -> Result<()> {
     let bridge_result = worker
         .join()
         .map_err(|_| anyhow::anyhow!("界面后台线程异常"))?;
+    if let Some(path) = &options.benchmark_log {
+        // Preserve the readiness timing measured by the bridge. This final
+        // checkpoint also distinguishes a native-window error from an orderly
+        // shutdown; an external test runner retains the actual process exit code.
+        if let Ok(bytes) = std::fs::read(path)
+            && let Ok(mut record) = serde_json::from_slice::<serde_json::Value>(&bytes)
+            && record.is_object()
+        {
+            record["ui_run_ok"] = json!(result.is_ok());
+            record["ui_bridge_ok"] = json!(bridge_result.is_ok());
+            record["ui_diagnostics"] = diagnostics.snapshot();
+            if let Ok(bytes) = serde_json::to_vec_pretty(&record) {
+                let _ = std::fs::write(path, bytes);
+            }
+        }
+    }
     result?;
     bridge_result?;
     let verification = client.wait_verified();
@@ -338,18 +395,26 @@ fn benchmark_record(
     window_ready_ms: Option<f64>,
     backend_ready_ms: Option<f64>,
     ui_closed: bool,
+    diagnostics: &UiDiagnostics,
+    last_ui_action: &str,
+    lifecycle_only: bool,
 ) -> serde_json::Value {
     json!({"application":"Jiks","read_only":read_only,"pid":std::process::id(),"broker_pid":broker_pid,
         "window_created_ms":window_ready_ms,"backend_ready_ms":backend_ready_ms,"elapsed_ms":start.elapsed().as_secs_f64()*1000.,
         "metadata_revision":snapshot.metadata_revision,"revision":snapshot.revision,"backend_ready":snapshot.backend_ready,"shutdown_ready":snapshot.shutdown_ready,"ui_closed":ui_closed,
         "metrics_count":snapshot.metrics.len(),"hardware_sensors_enabled":boolean(snapshot,"sensors.enabled",false),"thermal_active":boolean(snapshot,"thermal.active",false),"thermal_shadow":boolean(snapshot,"thermal.shadow",false),"configured_thermal_sampling_ms":snapshot.values.get("thermal.sampling_ms"),
         "power_modes":snapshot.options.get("power.mode").map(|o|o.iter().map(|c|json!({"label":c.label,"value":c.value})).collect::<Vec<_>>()),
-        "initialization_failed":snapshot.values.contains_key("backend.terminal_error")})
+        "initialization_failed":snapshot.values.contains_key("backend.terminal_error"),
+        "log_mode":if lifecycle_only {"lifecycle"} else {"periodic"},
+        "last_ui_action":last_ui_action,"ui_diagnostics":diagnostics.snapshot()})
 }
 
 pub fn apply_snapshot(model: &mut UiModel, state: &Snapshot) {
     let metadata_changed = model.metadata_revision != state.metadata_revision;
-    model.revision = state.revision;
+    // This is the view generation, not the broker's revision. A local tool
+    // completion may already have advanced it to the next broker revision;
+    // copying that number would then hide a real backend change from views.
+    model.revision = model.revision.wrapping_add(1);
     model.version = state.version.clone();
     model.machine = state.machine.clone();
     model.notice = state.notice.clone();
@@ -494,6 +559,21 @@ fn boolean(state: &Snapshot, key: &str, fallback: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn backend_update_remains_visible_after_a_local_result_uses_the_same_revision() {
+        let mut model = UiModel::default();
+        let mut state = Snapshot::default();
+        apply_snapshot(&mut model, &state);
+        model.finish(42, false, "local request rejected");
+        let last_observed_revision = model.revision;
+        state.revision = last_observed_revision;
+        state.notice = "connection failure confirmed".into();
+        state.shutdown_ready = true;
+        apply_snapshot(&mut model, &state);
+        assert_ne!(model.revision, last_observed_revision);
+        assert!(model.shutdown_ready);
+        assert_eq!(model.notice, "connection failure confirmed");
+    }
     #[test]
     fn realtime_bridge_keeps_editable_static_documents_without_copying_them() {
         let mut model = UiModel::default();

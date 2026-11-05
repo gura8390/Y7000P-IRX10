@@ -23,6 +23,8 @@ pub struct UiBridge {
     /// Isolated fixture only: exercise rebuild + nested modal + close, no Save.
     pub smoke_exercise_reentrancy: bool,
     pub diagnostics: Arc<UiDiagnostics>,
+    #[cfg(debug_assertions)]
+    pub layout_capture_dir: Option<std::path::PathBuf>,
 }
 impl UiBridge {
     pub fn new(model: Arc<Mutex<UiModel>>, actions: SyncSender<UiAction>) -> Self {
@@ -37,6 +39,8 @@ impl UiBridge {
             window_ready: None,
             smoke_exercise_reentrancy: false,
             diagnostics: Arc::new(UiDiagnostics::default()),
+            #[cfg(debug_assertions)]
+            layout_capture_dir: None,
         }
     }
     pub fn with_smoke_close_after(mut self, duration: Duration) -> Self {
@@ -59,6 +63,15 @@ pub struct UiDiagnostics {
     pub locale_switches: AtomicU64,
     pub status_opened: AtomicU64,
     pub status_closed: AtomicU64,
+    /// Fixed origin codes only; no captions, window titles or user data.
+    pub last_exit_origin: AtomicU64,
+    pub window_close_messages: AtomicU64,
+    pub main_exit_invocations: AtomicU64,
+    pub tray_exit_invocations: AtomicU64,
+    pub smoke_deadline_exits: AtomicU64,
+    pub ui_effect_exits: AtomicU64,
+    pub session_end_messages: AtomicU64,
+    pub window_destroy_messages: AtomicU64,
 }
 impl UiDiagnostics {
     pub fn snapshot(&self) -> Value {
@@ -69,7 +82,15 @@ impl UiDiagnostics {
             "shutdown_requests":self.shutdown_requests.load(Ordering::Relaxed),
             "overlays_opened":self.overlays_opened.load(Ordering::Relaxed),
             "overlays_closed":self.overlays_closed.load(Ordering::Relaxed),
-            "ui_effects_completed":self.ui_effects_completed.load(Ordering::Relaxed),"locale_switches":self.locale_switches.load(Ordering::Relaxed),"status_opened":self.status_opened.load(Ordering::Relaxed),"status_closed":self.status_closed.load(Ordering::Relaxed)})
+            "ui_effects_completed":self.ui_effects_completed.load(Ordering::Relaxed),"locale_switches":self.locale_switches.load(Ordering::Relaxed),"status_opened":self.status_opened.load(Ordering::Relaxed),"status_closed":self.status_closed.load(Ordering::Relaxed),
+            "last_exit_origin":match self.last_exit_origin.load(Ordering::Relaxed) {1=>"window_close",2=>"main_exit",3=>"tray_exit",4=>"smoke_deadline",5=>"ui_effect",6=>"session_end",_=>"none"},
+            "window_close_messages":self.window_close_messages.load(Ordering::Relaxed),
+            "main_exit_invocations":self.main_exit_invocations.load(Ordering::Relaxed),
+            "tray_exit_invocations":self.tray_exit_invocations.load(Ordering::Relaxed),
+            "smoke_deadline_exits":self.smoke_deadline_exits.load(Ordering::Relaxed),
+            "ui_effect_exits":self.ui_effect_exits.load(Ordering::Relaxed),
+            "session_end_messages":self.session_end_messages.load(Ordering::Relaxed),
+            "window_destroy_messages":self.window_destroy_messages.load(Ordering::Relaxed)})
     }
 }
 

@@ -31,7 +31,12 @@ struct Dialog {
     bridge: UiBridge,
     hwnd: HWND,
     font: HFONT,
+    heading: HFONT,
     brush: HBRUSH,
+    surface_brush: HBRUSH,
+    overview: bool,
+    overview_cards: Vec<(HWND, HWND)>,
+    scroll: i32,
     dpi: i32,
     groups: Vec<Value>,
     selected: usize,
@@ -77,6 +82,40 @@ pub(super) fn format_group(group: &Value, show_private: bool) -> String {
     }
     output
 }
+fn summary_group(group: &Value, show_private: bool) -> String {
+    let Some(rows) = group.get("rows").and_then(Value::as_array) else {
+        return super::i18n::tr("暂无数据").into_owned();
+    };
+    if let Some(error) = group.get("error").and_then(Value::as_str) {
+        return format!("{}: {error}", super::i18n::tr("读取失败"));
+    }
+    rows.iter()
+        .filter(|row| row.get("heading").and_then(Value::as_bool) != Some(true))
+        .filter(|row| {
+            !row.get("value")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .is_empty()
+        })
+        .take(2)
+        .map(|row| {
+            let label = row.get("label").and_then(Value::as_str).unwrap_or("");
+            let value =
+                if row.get("sensitive").and_then(Value::as_bool) == Some(true) && !show_private {
+                    "••••••"
+                } else {
+                    row.get("value").and_then(Value::as_str).unwrap_or("—")
+                };
+            let value = if value.chars().count() > 80 {
+                format!("{}…", value.chars().take(79).collect::<String>())
+            } else {
+                value.to_owned()
+            };
+            format!("{}：{value}", super::i18n::tr(label))
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n\r\n")
+}
 pub(super) fn open(parent: HWND, bridge: UiBridge) -> Result<()> {
     let _accessibility = a11y::UiThread::enter()?;
     unsafe {
@@ -96,8 +135,13 @@ pub(super) fn open(parent: HWND, bridge: UiBridge) -> Result<()> {
         let state = Box::new(RefCell::new(Dialog {
             bridge,
             hwnd: null_mut(),
-            font: font(dpi, 15, false),
+            font: font(dpi, 14, false),
+            heading: font(dpi, 17, true),
             brush: CreateSolidBrush(paper()),
+            surface_brush: CreateSolidBrush(surface()),
+            overview: true,
+            overview_cards: vec![],
+            scroll: 0,
             dpi: dpi as i32,
             groups: vec![],
             selected: 0,
@@ -120,7 +164,7 @@ pub(super) fn open(parent: HWND, bridge: UiBridge) -> Result<()> {
             WS_EX_DLGMODALFRAME,
             class.as_ptr(),
             wide(&super::i18n::tr("设备信息 · 机控")).as_ptr(),
-            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VSCROLL,
             (rect.left + (rect.right - rect.left - width) / 2).max(0),
             (rect.top + (rect.bottom - rect.top - height) / 2).max(0),
             width,
@@ -145,6 +189,10 @@ pub(super) fn open(parent: HWND, bridge: UiBridge) -> Result<()> {
                 }
                 break;
             }
+            #[cfg(debug_assertions)]
+            if super::capture_fixture::consume(&msg) {
+                continue;
+            }
             if IsDialogMessageW(hwnd, &msg) == 0 {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -163,7 +211,9 @@ impl Drop for Dialog {
     fn drop(&mut self) {
         unsafe {
             DeleteObject(self.font);
+            DeleteObject(self.heading);
             DeleteObject(self.brush);
+            DeleteObject(self.surface_brush);
         }
     }
 }
@@ -193,6 +243,9 @@ impl Dialog {
                 null(),
             );
             SendMessageW(hwnd, WM_SETFONT, self.font as usize, 1);
+            if class == "STATIC" {
+                install_label_paint(hwnd);
+            }
             let en = super::i18n::language() == "en";
             let label = |zh, english| if en { english } else { zh };
             let (semantic_id, name, help) = match id {
@@ -256,6 +309,15 @@ impl Dialog {
             // Keep inventory text in the native read-only EDIT Value provider.
             // No raw or unmasked metadata is copied into Name/HelpText.
             a11y::annotate(hwnd, semantic_id, name, help);
+            if id == BODY {
+                presentation_flag(hwnd, "Jiks.Surface", true);
+            }
+            if id == CLOSE {
+                presentation_flag(hwnd, "Jiks.Primary", true);
+            }
+            if id == 26 {
+                presentation_flag(hwnd, "Jiks.Muted", true);
+            }
             hwnd
         }
     }
@@ -263,9 +325,9 @@ impl Dialog {
         unsafe {
             a11y::annotate(self.hwnd, "device-information.root", None, None);
             self.child(
-                "LISTBOX",
+                "COMBOBOX",
                 "",
-                WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY as u32 | LBS_NOINTEGRALHEIGHT as u32,
+                WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32,
                 GROUPS,
             );
             self.child(
@@ -284,37 +346,67 @@ impl Dialog {
                 WS_TABSTOP | BS_AUTOCHECKBOX as u32,
                 PRIVATE,
             );
-            self.child("BUTTON", "刷新", WS_TABSTOP, REFRESH);
-            self.child("BUTTON", "复制本页", WS_TABSTOP, COPY);
-            self.child("BUTTON", "复制全部", WS_TABSTOP, COPY_ALL);
+            self.child("BUTTON", "刷新", WS_TABSTOP | BS_OWNERDRAW as u32, REFRESH);
+            self.child("BUTTON", "复制本页", WS_TABSTOP | BS_OWNERDRAW as u32, COPY);
             self.child(
                 "BUTTON",
-                "关闭",
-                WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
-                CLOSE,
+                "复制全部",
+                WS_TABSTOP | BS_OWNERDRAW as u32,
+                COPY_ALL,
             );
+            self.child("BUTTON", "关闭", WS_TABSTOP | BS_OWNERDRAW as u32, CLOSE);
             self.child("STATIC", "", SS_LEFT as u32, 26);
+            let heading = self.child("STATIC", &super::i18n::tr("设备信息"), SS_LEFT as u32, 30);
+            SendMessageW(heading, WM_SETFONT, self.heading as usize, 0);
+            a11y::annotate(heading, "device-information.title", None, None);
+            self.child(
+                "STATIC",
+                &super::i18n::tr("设备信息分类"),
+                SS_LEFT as u32,
+                31,
+            );
+            for index in 0..6 {
+                let title = self.child("STATIC", "", SS_LEFT as u32, 100 + index * 2);
+                SendMessageW(title, WM_SETFONT, self.heading as usize, 0);
+                let body = self.child("STATIC", "", SS_LEFT as u32, 101 + index * 2);
+                a11y::annotate(
+                    title,
+                    &format!("device-information.overview.{}.title", index),
+                    None,
+                    None,
+                );
+                a11y::annotate(
+                    body,
+                    &format!("device-information.overview.{}.body", index),
+                    None,
+                    None,
+                );
+                presentation_flag(title, "Jiks.Surface", true);
+                presentation_flag(body, "Jiks.Surface", true);
+                self.overview_cards.push((title, body));
+            }
             self.layout();
             self.refresh();
             SetTimer(self.hwnd, 1, 200, None);
         }
     }
-    unsafe fn layout(&self) {
+    unsafe fn layout(&mut self) {
         unsafe {
             let mut rect: RECT = zeroed();
             GetClientRect(self.hwnd, &mut rect);
             let w = rect.right * 96 / self.dpi;
             let h = rect.bottom * 96 / self.dpi;
-            let nav = if w < 680 { 120 } else { 165 };
             let positions = [
-                (GROUPS, 16, 18, nav, h - 136),
-                (BODY, nav + 30, 18, (w - nav - 46).max(100), h - 136),
-                (PRIVATE, 16, h - 103, w - 32, 26),
-                (REFRESH, 16, h - 69, 75, 30),
-                (COPY, 99, h - 69, 94, 30),
-                (COPY_ALL, 201, h - 69, 94, 30),
-                (CLOSE, w - 94, h - 69, 78, 30),
-                (26, 16, h - 31, w - 32, 24),
+                (30, 20, 18, w - 40, 30),
+                (31, 20, 58, 140, 26),
+                (GROUPS, 166, 54, (w - 186).max(100), 300),
+                (BODY, 32, 108, (w - 64).max(100), (h - 250).max(80)),
+                (PRIVATE, 20, h - 103, w - 40, 26),
+                (REFRESH, 20, h - 69, 75, 32),
+                (COPY, 103, h - 69, 94, 32),
+                (COPY_ALL, 205, h - 69, 94, 32),
+                (CLOSE, w - 98, h - 69, 78, 32),
+                (26, 20, h - 31, w - 40, 24),
             ];
             for (id, x, y, width, height) in positions {
                 MoveWindow(
@@ -326,6 +418,105 @@ impl Dialog {
                     1,
                 );
             }
+            let columns = if w >= 800 { 3 } else { 2 };
+            let rows = (self.overview_cards.len() as i32 + columns - 1) / columns;
+            let card_width = (w - 40 - (columns - 1) * 12) / columns;
+            let viewport = (h - 226).max(80);
+            let card_height = 204;
+            let content = rows * (card_height + 12) - 12;
+            let maximum = if self.overview {
+                (content - viewport).max(0)
+            } else {
+                0
+            };
+            self.scroll = self.scroll.clamp(0, maximum);
+            let info = SCROLLINFO {
+                cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+                fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
+                nMin: 0,
+                nMax: if self.overview { content } else { 0 },
+                nPage: viewport as u32,
+                nPos: self.scroll,
+                nTrackPos: 0,
+            };
+            SetScrollInfo(self.hwnd, SB_VERT, &info, 1);
+            for (index, (title, body)) in self.overview_cards.iter().enumerate() {
+                let x = 20 + (index as i32 % columns) * (card_width + 12);
+                let y = 96 + (index as i32 / columns) * (card_height + 12) - self.scroll;
+                for (hwnd, offset, height) in [(*title, 16, 28), (*body, 54, 136)] {
+                    MoveWindow(
+                        hwnd,
+                        self.s(x + 16),
+                        self.s(y + offset),
+                        self.s(card_width - 32),
+                        self.s(height),
+                        1,
+                    );
+                    let visible = clip_to_viewport(
+                        hwnd,
+                        y + offset,
+                        card_width - 32,
+                        height,
+                        90,
+                        h - 126,
+                        self.dpi as u32,
+                    );
+                    ShowWindow(
+                        hwnd,
+                        if self.overview && visible {
+                            SW_SHOWNA
+                        } else {
+                            SW_HIDE
+                        },
+                    );
+                }
+            }
+            ShowWindow(
+                GetDlgItem(self.hwnd, BODY),
+                if self.overview { SW_HIDE } else { SW_SHOWNA },
+            );
+            InvalidateRect(self.hwnd, null(), 1);
+        }
+    }
+    unsafe fn paint(&self, dc: HDC) {
+        unsafe {
+            let mut rect: RECT = zeroed();
+            GetClientRect(self.hwnd, &mut rect);
+            let w = rect.right * 96 / self.dpi;
+            let h = rect.bottom * 96 / self.dpi;
+            let saved = SaveDC(dc);
+            FillRect(dc, &rect, self.brush);
+            IntersectClipRect(dc, self.s(16), self.s(90), self.s(w - 16), self.s(h - 126));
+            if self.overview {
+                let columns = if w >= 800 { 3 } else { 2 };
+                let card_width = (w - 40 - (columns - 1) * 12) / columns;
+                for index in 0..self.overview_cards.len() as i32 {
+                    let x = 20 + (index % columns) * (card_width + 12);
+                    let y = 96 + (index / columns) * 216 - self.scroll;
+                    paint_card(
+                        dc,
+                        &RECT {
+                            left: self.s(x),
+                            top: self.s(y),
+                            right: self.s(x + card_width),
+                            bottom: self.s(y + 204),
+                        },
+                        self.dpi as u32,
+                    );
+                }
+            } else {
+                paint_card(
+                    dc,
+                    &RECT {
+                        left: self.s(20),
+                        top: self.s(96),
+                        right: self.s(w - 20),
+                        bottom: self.s(h - 130),
+                    },
+                    self.dpi as u32,
+                );
+            }
+            RestoreDC(dc, saved);
         }
     }
     unsafe fn refresh(&mut self) {
@@ -355,7 +546,7 @@ impl Dialog {
             text(GetDlgItem(self.hwnd, 26), &self.status);
         }
     }
-    unsafe fn render_body(&self) {
+    unsafe fn render_body(&mut self) {
         unsafe {
             let body = self
                 .groups
@@ -363,6 +554,31 @@ impl Dialog {
                 .map(|g| format_group(g, self.show_private))
                 .unwrap_or_else(|| "设备信息尚未读取。请稍候，或点击刷新重试。".into());
             text(GetDlgItem(self.hwnd, BODY), &body);
+            for (index, key) in ["device", "cpu", "gpu", "memory", "disks", "bios"]
+                .iter()
+                .enumerate()
+            {
+                if let Some((title, body)) = self.overview_cards.get(index) {
+                    let group = self
+                        .groups
+                        .iter()
+                        .find(|group| group.get("id").and_then(Value::as_str) == Some(*key));
+                    let caption = group
+                        .and_then(|group| group.get("title"))
+                        .and_then(Value::as_str)
+                        .unwrap_or(["设备", "CPU", "显卡", "内存", "磁盘", "BIOS"][index]);
+                    text(*title, &super::i18n::tr(caption));
+                    text(
+                        *body,
+                        &group
+                            .map(|group| summary_group(group, self.show_private))
+                            .unwrap_or_else(|| super::i18n::tr("暂无数据").into_owned()),
+                    );
+                }
+            }
+            self.layout();
+            #[cfg(debug_assertions)]
+            super::capture_fixture::queue(self.hwnd, &self.bridge, "device-information");
         }
     }
     unsafe fn tick(&mut self) {
@@ -397,11 +613,17 @@ impl Dialog {
                     self.groups = groups;
                     self.selected = self.selected.min(self.groups.len().saturating_sub(1));
                     let list = GetDlgItem(self.hwnd, GROUPS);
-                    SendMessageW(list, LB_RESETCONTENT, 0, 0);
+                    SendMessageW(list, CB_RESETCONTENT, 0, 0);
+                    SendMessageW(
+                        list,
+                        CB_ADDSTRING,
+                        0,
+                        wide(&super::i18n::tr("概览")).as_ptr() as isize,
+                    );
                     for group in &self.groups {
                         SendMessageW(
                             list,
-                            LB_ADDSTRING,
+                            CB_ADDSTRING,
                             0,
                             wide(&super::i18n::tr(
                                 group.get("title").and_then(Value::as_str).unwrap_or("设备"),
@@ -409,7 +631,12 @@ impl Dialog {
                             .as_ptr() as isize,
                         );
                     }
-                    SendMessageW(list, LB_SETCURSEL, self.selected, 0);
+                    SendMessageW(
+                        list,
+                        CB_SETCURSEL,
+                        if self.overview { 0 } else { self.selected + 1 },
+                        0,
+                    );
                     self.render_body();
                 }
             }
@@ -433,9 +660,13 @@ impl Dialog {
     }
     unsafe fn copy(&self, all: bool) {
         unsafe {
-            let value = if all {
+            let value = if all || self.overview {
                 self.groups
                     .iter()
+                    .filter(|g| {
+                        all || ["device", "cpu", "gpu", "memory", "disks", "bios"]
+                            .contains(&g.get("id").and_then(Value::as_str).unwrap_or(""))
+                    })
                     .map(|g| format_group(g, self.show_private))
                     .collect::<Vec<_>>()
                     .join("\r\n")
@@ -474,6 +705,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             return DefWindowProcW(hwnd, msg, wp, lp);
         }
+        if let Some(result) = presentation_message(msg, wp, lp) {
+            return result;
+        }
         let destroy = {
             let Ok(mut d) = (*raw).try_borrow_mut() else {
                 return DefWindowProcW(hwnd, msg, wp, lp);
@@ -488,16 +722,80 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize
                     info.ptMinTrackSize.y = d.s(420);
                 }
                 WM_CLOSE => d.destroy = true,
-                WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
-                    SetTextColor(wp as HDC, ink());
-                    SetBkColor(wp as HDC, paper());
-                    return d.brush as isize;
+                WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
+                    let on_surface = lp as HWND == GetDlgItem(hwnd, BODY)
+                        || d.overview_cards
+                            .iter()
+                            .any(|(title, body)| *title == lp as HWND || *body == lp as HWND);
+                    SetTextColor(
+                        wp as HDC,
+                        if lp as HWND == GetDlgItem(hwnd, 26) {
+                            muted()
+                        } else {
+                            ink()
+                        },
+                    );
+                    SetBkMode(wp as HDC, TRANSPARENT as i32);
+                    SetBkColor(wp as HDC, if on_surface { surface() } else { paper() });
+                    return (if on_surface { d.surface_brush } else { d.brush }) as isize;
+                }
+                WM_ERASEBKGND => {
+                    let mut rect: RECT = zeroed();
+                    GetClientRect(hwnd, &mut rect);
+                    FillRect(wp as HDC, &rect, d.brush);
+                    d.paint(wp as HDC);
+                    return 1;
+                }
+                WM_PAINT => {
+                    let mut ps: PAINTSTRUCT = zeroed();
+                    let dc = BeginPaint(hwnd, &mut ps);
+                    d.paint(dc);
+                    EndPaint(hwnd, &ps);
+                    return 0;
+                }
+                WM_PRINTCLIENT => {
+                    d.paint(wp as HDC);
+                    return 0;
+                }
+                WM_DRAWITEM => {
+                    let item = &*(lp as *const DRAWITEMSTRUCT);
+                    if item.CtlID == CLOSE as u32 {
+                        paint_primary_button(item);
+                    } else {
+                        paint_button(item, false);
+                    }
+                    return 1;
+                }
+                WM_MOUSEWHEEL => {
+                    d.scroll -= ((wp >> 16) as u16 as i16 as i32) / 120 * 64;
+                    d.layout();
+                }
+                WM_VSCROLL => {
+                    d.scroll = match (wp & 0xffff) as i32 {
+                        SB_LINEUP => d.scroll - 32,
+                        SB_LINEDOWN => d.scroll + 32,
+                        SB_PAGEUP => d.scroll - 180,
+                        SB_PAGEDOWN => d.scroll + 180,
+                        SB_THUMBTRACK | SB_THUMBPOSITION => {
+                            let mut si: SCROLLINFO = zeroed();
+                            si.cbSize = std::mem::size_of::<SCROLLINFO>() as u32;
+                            si.fMask = SIF_TRACKPOS;
+                            GetScrollInfo(hwnd, SB_VERT, &mut si);
+                            si.nTrackPos
+                        }
+                        _ => d.scroll,
+                    };
+                    d.layout();
                 }
                 WM_COMMAND => match (wp & 0xffff) as i32 {
-                    GROUPS if ((wp >> 16) & 0xffff) == LBN_SELCHANGE as usize => {
-                        let index = SendMessageW(GetDlgItem(hwnd, GROUPS), LB_GETCURSEL, 0, 0);
+                    GROUPS if ((wp >> 16) & 0xffff) == CBN_SELCHANGE as usize => {
+                        let index = SendMessageW(GetDlgItem(hwnd, GROUPS), CB_GETCURSEL, 0, 0);
                         if index >= 0 {
-                            d.selected = index as usize;
+                            d.overview = index == 0;
+                            if index > 0 {
+                                d.selected = index as usize - 1;
+                            }
+                            d.scroll = 0;
                             d.render_body();
                         }
                     }
@@ -532,6 +830,19 @@ mod tests {
         assert!(masked.contains("NVMe"));
         assert!(!masked.contains("SECRET123"));
         assert!(format_group(&group, true).contains("SECRET123"));
+    }
+    #[test]
+    fn overview_summary_obeys_the_same_privacy_toggle_as_copy_and_details() {
+        let group = json!({"id":"bios","title":"BIOS","rows":[
+            {"label":"设备序列号","value":"PRIVATE-OVERVIEW-SERIAL","sensitive":true},
+            {"label":"BIOS 版本","value":"S9CN15WW"},
+            {"label":"插槽信息","heading":true,"value":"ignored heading"}
+        ]});
+        let masked = summary_group(&group, false);
+        assert!(!masked.contains("PRIVATE-OVERVIEW-SERIAL"));
+        assert!(masked.contains("••••••") && masked.contains("S9CN15WW"));
+        assert!(!masked.contains("ignored heading"));
+        assert!(summary_group(&group, true).contains("PRIVATE-OVERVIEW-SERIAL"));
     }
     #[test]
     fn never_visible_controls_expose_semantics_without_unmasking_native_inventory_value() {
@@ -572,8 +883,13 @@ mod tests {
         let mut fixture = Hidden(Dialog {
             bridge,
             hwnd,
-            font: unsafe { font(96, 15, false) },
+            font: unsafe { font(96, 14, false) },
+            heading: unsafe { font(96, 17, true) },
             brush: unsafe { CreateSolidBrush(paper()) },
+            surface_brush: unsafe { CreateSolidBrush(surface()) },
+            overview: true,
+            overview_cards: vec![],
+            scroll: 0,
             dpi: 96,
             groups: vec![
                 json!({"title":"Disk","rows":[{"label":"Serial","value":"SYNTHETIC_PRIVATE_SERIAL","sensitive":true}]}),

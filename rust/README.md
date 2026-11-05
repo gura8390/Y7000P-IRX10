@@ -92,10 +92,22 @@ and provenance are also included under `licenses/PawnIO-source/` in the package.
 MPL-marked sensor files and the native protocol source are included with their
 full licenses and attribution. See `licenses/NativeAdapters-NOTICE.txt`.
 
-Use the installed 方正公文楷体 font where licensed; the interface falls back to
-Windows fonts. No proprietary font is included in public source or packages.
+The interface uses Windows UI fonts, preferring Microsoft YaHei UI and falling
+back to Segoe UI. No font binary is included in public source or packages.
 
 ## Verification boundaries
+
+The November 2026 UI update follows the original narrow icon navigation,
+individual setting rows, sensor groups and device-information overview. It
+keeps native semantic controls and their accessibility identifiers. State is
+copied across the GUI/broker boundary only when it changes; empty background
+key polling no longer publishes a busy-state pulse. Actual slow operations,
+connection failures and verified shutdown remain observable.
+
+Complete-application resource results belong to the exact tested source and
+binary. Use the matching release verification report; the earlier benchmark
+scope described below is historical and does not establish a new build's
+performance advantage.
 
 `cargo test --workspace --locked` runs pure/temporary-directory tests and the
 explicitly isolated never-visible native-window fixtures. A separately requested

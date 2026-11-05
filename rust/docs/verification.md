@@ -50,10 +50,15 @@ Descriptors do not prove a Spectrum handshake or successful profile writes.
   full 500-interval window. Unknown, lost or stale samples are unavailable values.
 - Intel requested VID is not measured Vcore; ratio-derived frequency is not
   effective-clock telemetry. Missing sources remain unknown.
-- The installed 方正公文楷体 font is preferred where available. Public source and
-  packages exclude the proprietary font binary and use Windows fallback fonts.
+- Windows UI fonts are used, preferring Microsoft YaHei UI and falling back to
+  Segoe UI. Public source and packages contain no font binary.
 
-## Current candidate evidence (2026-11-03)
+## Historical candidate evidence for 670e571f (2026-11-03)
+
+This section records an earlier source snapshot, not the current branch head.
+Later UI, IPC and scheduling changes require their own build and test evidence.
+Full-application CPU/memory results must be taken from the matching release
+report rather than carried forward from a different source or executable.
 
 The current local source candidate freezes 162 Rust/Cargo/embedded inputs with
 aggregate SHA-256

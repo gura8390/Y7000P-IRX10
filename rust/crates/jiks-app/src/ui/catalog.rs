@@ -771,7 +771,7 @@ pub fn sections(page: Page, tools_tab: usize, model: &UiModel) -> Vec<Section> {
         Page::Settings => tools(tools_tab, model),
         Page::Packages => packages(),
         Page::About => vec![Section {
-            title: tr_static("机控 / Jiks").into(),
+            title: tr_static("项目与许可").into(),
             hint: tr_static(
                 "仅适配本机 Y7000P IRX10 · 83NN。原生 Rust / Win32 界面。版本、设备能力和运行状态以后台确认结果为准。",
             ),
@@ -1162,7 +1162,16 @@ fn tools(tab: usize, model: &UiModel) -> Vec<Section> {
     let _ = model;
     vec![Section {
         title: tr_static(TOOL_TABS[tab.min(7)]).into(),
-        hint: tr_static("沿用原版设置分类。保存失败时保留正在编辑的内容，已确认状态由后台返回。"),
+        hint: tr_static([
+            "管理启动、窗口行为、传感器与桌面显示。修改后保存设置。",
+            "调整语言、主题色与窗口背景。修改后保存设置。",
+            "设置性能模式与 Windows 电源选项之间的同步方式。",
+            "管理屏幕亮度与开机画面。",
+            "配置智能按键与自定义 Fn 功能。",
+            "查看和管理本机联想软件的控制状态。",
+            "检查工具箱更新与可用版本。",
+            "管理集成选项与外部命令。",
+        ][tab.min(7)]),
         fields,
         actions,
     }]

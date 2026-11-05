@@ -137,12 +137,15 @@ pub fn broker(root: std::path::PathBuf, read_only: bool) -> Result<()> {
             }
         })?;
     let mut output = crate::ipc_output::OutputPump::new()?;
+    let mut state = Snapshot::default();
     let mut revision = 0;
     let mut pipe_broken = false;
     let mut disconnected_shutdown_sent = false;
     let mut encoding_error: Option<String> = None;
     loop {
-        let state = runtime.snapshot();
+        if let Some(changed) = runtime.snapshot_if_changed(revision) {
+            state = changed;
+        }
         if output.broken() || output.stalled() {
             pipe_broken = true;
         }
@@ -211,26 +214,41 @@ struct Connection {
     closed: AtomicBool,
     close_writer: AtomicBool,
     pending: Mutex<BTreeSet<u64>>,
-    failures: Mutex<VecDeque<CommandResult>>,
-    fault: Mutex<Option<String>>,
+    overlay: Mutex<ConnectionOverlay>,
+}
+#[derive(Default)]
+struct ConnectionOverlay {
+    revision: u64,
+    failures: VecDeque<CommandResult>,
+    fault: Option<String>,
 }
 impl Connection {
+    fn admit(&self, request_id: u64) -> Result<()> {
+        let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+        // Serialization can take time after submit's cheap early check. Pair
+        // this final check with fail's drain under the same mutex: the request
+        // is either rejected here or included in that failure acknowledgement.
+        ensure!(!self.closed.load(Ordering::Acquire), "后台连接已关闭");
+        pending.insert(request_id);
+        Ok(())
+    }
     fn fail(&self, message: String) {
         self.closed.store(true, Ordering::Release);
         self.close_writer.store(true, Ordering::Release);
-        *self.fault.lock().unwrap_or_else(|p| p.into_inner()) = Some(message.clone());
         let ids = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|p| p.into_inner()));
-        let mut failures = self.failures.lock().unwrap_or_else(|p| p.into_inner());
+        let mut overlay = self.overlay.lock().unwrap_or_else(|p| p.into_inner());
+        overlay.fault = Some(message.clone());
         for request_id in ids {
-            failures.push_back(CommandResult {
+            overlay.failures.push_back(CommandResult {
                 request_id,
                 ok: false,
                 message: message.clone(),
             });
         }
-        while failures.len() > 128 {
-            failures.pop_front();
+        while overlay.failures.len() > 128 {
+            overlay.failures.pop_front();
         }
+        overlay.revision = overlay.revision.wrapping_add(1);
     }
     fn acknowledge(&self, state: &Snapshot) {
         let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
@@ -238,6 +256,13 @@ impl Connection {
             pending.remove(&result.request_id);
         }
     }
+}
+/// Opaque observation token. A local pipe failure can change what the UI sees
+/// without advancing the broker's state revision, so both generations matter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SnapshotCursor {
+    state_revision: u64,
+    connection_revision: u64,
 }
 pub struct BrokerClient {
     state: Arc<Mutex<Snapshot>>,
@@ -340,41 +365,24 @@ impl BrokerClient {
         })
     }
     pub fn snapshot(&self) -> Snapshot {
-        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let failures = self
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let overlay = self
             .connection
-            .failures
+            .overlay
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        for failure in failures.iter() {
-            if !state
-                .results
-                .iter()
-                .any(|r| r.request_id == failure.request_id)
-            {
-                state.results.push_back(failure.clone());
-            }
-        }
-        while state.results.len() > 128 {
-            state.results.pop_front();
-        }
-        if !state.shutdown_ready {
-            if let Some(error) = self
-                .connection
-                .fault
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone()
-            {
-                state.backend_ready = false;
-                state.notice = error;
-                state
-                    .values
-                    .insert("backend.connection_failed".into(), Value::Bool(true));
-                state.revision = state.revision.wrapping_add(1);
-            }
-        }
-        state
+        snapshot_with_overlay(&state, &overlay)
+    }
+    /// Returns the next observed state only when either the broker or the
+    /// connection diagnostics changed. Never starts I/O or discards failures.
+    pub fn snapshot_if_changed(&self, cursor: &mut SnapshotCursor) -> Option<Snapshot> {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let overlay = self
+            .connection
+            .overlay
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        snapshot_if_changed(&state, &overlay, cursor)
     }
     pub fn submit(&self, command: Command) -> Result<()> {
         ensure!(
@@ -384,11 +392,7 @@ impl BrokerClient {
         // Reject oversized user input before touching a live pipe or replacing its worker.
         let bytes = encode_frame(&command)?;
         let request_id = command.request_id();
-        self.connection
-            .pending
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(request_id);
+        self.connection.admit(request_id)?;
         if let Err(error) = self.commands.try_send(Outbound { bytes }) {
             self.connection
                 .pending
@@ -423,6 +427,50 @@ impl BrokerClient {
         ensure!(status.success(), "后台退出代码异常：{status}");
         Ok(())
     }
+}
+fn snapshot_if_changed(
+    state: &Snapshot,
+    overlay: &ConnectionOverlay,
+    cursor: &mut SnapshotCursor,
+) -> Option<Snapshot> {
+    let current = SnapshotCursor {
+        state_revision: state.revision,
+        connection_revision: overlay.revision,
+    };
+    if *cursor == current {
+        return None;
+    }
+    let result = snapshot_with_overlay(state, overlay);
+    *cursor = current;
+    Some(result)
+}
+fn snapshot_with_overlay(state: &Snapshot, overlay: &ConnectionOverlay) -> Snapshot {
+    let mut state = state.clone();
+    for failure in &overlay.failures {
+        if !state
+            .results
+            .iter()
+            .any(|r| r.request_id == failure.request_id)
+        {
+            state.results.push_back(failure.clone());
+        }
+    }
+    while state.results.len() > 128 {
+        state.results.pop_front();
+    }
+    if !state.shutdown_ready {
+        if let Some(error) = &overlay.fault {
+            state.backend_ready = false;
+            state.notice = error.clone();
+            state
+                .values
+                .insert("backend.connection_failed".into(), Value::Bool(true));
+        }
+    }
+    // Advance for every local failure too, including a later terminal
+    // broker frame. Native views use this revision to refresh/finish exit.
+    state.revision = state.revision.wrapping_add(overlay.revision);
+    state
 }
 
 #[cfg(test)]
@@ -478,12 +526,60 @@ mod tests {
     #[test]
     fn closing_connection_fails_every_outstanding_request_without_losing_metadata() {
         let c = Connection::default();
-        c.pending.lock().unwrap().extend([1, 2, 3]);
+        for request_id in [1, 2, 3] {
+            c.admit(request_id).unwrap();
+        }
         c.fail("pipe broken".into());
         assert!(c.closed.load(Ordering::Acquire));
         assert!(c.pending.lock().unwrap().is_empty());
-        assert_eq!(c.failures.lock().unwrap().len(), 3);
-        assert!(c.failures.lock().unwrap().iter().all(|r| !r.ok));
+        assert_eq!(c.overlay.lock().unwrap().failures.len(), 3);
+        assert!(c.overlay.lock().unwrap().failures.iter().all(|r| !r.ok));
+    }
+    #[test]
+    fn disconnect_after_preflight_cannot_strand_a_new_request() {
+        let c = Connection::default();
+        // submit's initial check succeeded, then another thread detected the
+        // broken pipe while the command was being encoded.
+        assert!(!c.closed.load(Ordering::Acquire));
+        c.fail("pipe closed during serialization".into());
+        assert!(c.admit(42).is_err());
+        assert!(c.pending.lock().unwrap().is_empty());
+        assert!(c.overlay.lock().unwrap().failures.is_empty());
+    }
+    #[test]
+    fn incremental_snapshots_surface_local_failures_then_terminal_cleanup() {
+        let mut state = Snapshot::default();
+        state.backend_ready = true;
+        let connection = Connection::default();
+        let mut cursor = SnapshotCursor::default();
+        let initial =
+            snapshot_if_changed(&state, &connection.overlay.lock().unwrap(), &mut cursor).unwrap();
+        assert!(
+            snapshot_if_changed(&state, &connection.overlay.lock().unwrap(), &mut cursor).is_none()
+        );
+        connection.pending.lock().unwrap().insert(42);
+        connection.fail("first pipe fault".into());
+        let failed =
+            snapshot_if_changed(&state, &connection.overlay.lock().unwrap(), &mut cursor).unwrap();
+        assert_ne!(failed.revision, initial.revision);
+        assert!(!failed.backend_ready);
+        assert_eq!(failed.results.back().unwrap().request_id, 42);
+        assert!(Arc::ptr_eq(&initial.documents, &failed.documents));
+        assert!(
+            snapshot_if_changed(&state, &connection.overlay.lock().unwrap(), &mut cursor).is_none()
+        );
+        connection.fail("second pipe fault".into());
+        let second =
+            snapshot_if_changed(&state, &connection.overlay.lock().unwrap(), &mut cursor).unwrap();
+        assert_ne!(second.revision, failed.revision);
+        assert_eq!(second.notice, "second pipe fault");
+        state.shutdown_ready = true;
+        state.revision += 1;
+        let terminal =
+            snapshot_if_changed(&state, &connection.overlay.lock().unwrap(), &mut cursor).unwrap();
+        assert_ne!(terminal.revision, second.revision);
+        assert!(terminal.shutdown_ready);
+        assert_eq!(terminal.results.len(), 1);
     }
     #[test]
     fn oversized_command_is_rejected_before_a_pipe_is_written() {
