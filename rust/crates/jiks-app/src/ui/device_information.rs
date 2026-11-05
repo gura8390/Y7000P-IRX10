@@ -708,6 +708,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize
         if let Some(result) = presentation_message(msg, wp, lp) {
             return result;
         }
+        // DefWindowProc handles WM_PRINT by synchronously sending this window
+        // WM_ERASEBKGND and WM_PRINTCLIENT. Keep Dialog unborrowed so those
+        // callbacks can paint the actual overview surfaces.
+        if msg == WM_PRINT {
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
         let destroy = {
             let Ok(mut d) = (*raw).try_borrow_mut() else {
                 return DefWindowProcW(hwnd, msg, wp, lp);
@@ -843,6 +849,121 @@ mod tests {
         assert!(masked.contains("••••••") && masked.contains("S9CN15WW"));
         assert!(!masked.contains("ignored heading"));
         assert!(summary_group(&group, true).contains("PRIVATE-OVERVIEW-SERIAL"));
+    }
+    #[test]
+    fn actual_device_wndproc_print_keeps_overview_cards_through_default_reentry() {
+        let _accessibility = a11y::UiThread::enter().unwrap();
+        let (actions, _receiver) = std::sync::mpsc::sync_channel(4);
+        let model = std::sync::Arc::new(std::sync::Mutex::new(UiModel::default()));
+        struct Fixture {
+            hwnd: HWND,
+            class: Vec<u16>,
+            _state: Box<RefCell<Dialog>>,
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                unsafe {
+                    if IsWindow(self.hwnd) != 0 {
+                        DestroyWindow(self.hwnd);
+                    }
+                    UnregisterClassW(self.class.as_ptr(), GetModuleHandleW(null()));
+                }
+            }
+        }
+        struct Canvas {
+            dc: HDC,
+            bitmap: HBITMAP,
+            old: HGDIOBJ,
+        }
+        impl Drop for Canvas {
+            fn drop(&mut self) {
+                unsafe {
+                    SelectObject(self.dc, self.old);
+                    DeleteObject(self.bitmap);
+                    DeleteDC(self.dc);
+                }
+            }
+        }
+        unsafe {
+            let class = wide("Jiks.Test.DeviceInformationPrint");
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(window_proc),
+                hInstance: GetModuleHandleW(null()),
+                hbrBackground: GetStockObject(WHITE_BRUSH) as HBRUSH,
+                lpszClassName: class.as_ptr(),
+                ..zeroed()
+            };
+            assert_ne!(RegisterClassW(&wc), 0);
+            let state = Box::new(RefCell::new(Dialog {
+                bridge: UiBridge::new(model, actions),
+                hwnd: null_mut(),
+                font: font(96, 14, false),
+                heading: font(96, 17, true),
+                brush: CreateSolidBrush(paper()),
+                surface_brush: CreateSolidBrush(surface()),
+                overview: true,
+                overview_cards: vec![],
+                scroll: 0,
+                dpi: 96,
+                groups: vec![],
+                selected: 0,
+                show_private: false,
+                revision: u64::MAX,
+                pending: None,
+                status: String::new(),
+                destroy: false,
+                started: Instant::now(),
+            }));
+            let hwnd = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                wide("Synthetic never-visible device print").as_ptr(),
+                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VSCROLL,
+                0,
+                0,
+                950,
+                720,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                (&*state as *const RefCell<Dialog>).cast(),
+            );
+            let fixture = Fixture {
+                hwnd,
+                class,
+                _state: state,
+            };
+            assert!(!fixture.hwnd.is_null());
+            assert_eq!(IsWindowVisible(fixture.hwnd), 0);
+            let mut client: RECT = zeroed();
+            GetClientRect(fixture.hwnd, &mut client);
+            let screen = GetDC(null_mut());
+            let dc = CreateCompatibleDC(screen);
+            let bitmap = CreateCompatibleBitmap(screen, client.right, client.bottom);
+            ReleaseDC(null_mut(), screen);
+            assert!(!dc.is_null() && !bitmap.is_null());
+            let old = SelectObject(dc, bitmap);
+            assert!(!old.is_null() && old as isize != -1);
+            let canvas = Canvas { dc, bitmap, old };
+            let points = [(12, 160), (24, 160), (20, 160)];
+            fill(canvas.dc, &client, 0x00ff00ff);
+            SendMessageW(fixture.hwnd, WM_PRINTCLIENT, canvas.dc as usize, 0);
+            let direct = points.map(|(x, y)| GetPixel(canvas.dc, x, y));
+            assert_eq!(direct, [paper(), surface(), line()]);
+            fill(canvas.dc, &client, 0x00ff00ff);
+            SendMessageW(
+                fixture.hwnd,
+                WM_PRINT,
+                canvas.dc as usize,
+                (PRF_CLIENT | PRF_ERASEBKGND | PRF_CHILDREN) as isize,
+            );
+            let delegated = points.map(|(x, y)| GetPixel(canvas.dc, x, y));
+            assert_eq!(
+                delegated, direct,
+                "DefWindowProc WM_PRINT must reenter the actual device WM_PRINTCLIENT without a held Dialog borrow"
+            );
+            assert_eq!(IsWindowVisible(fixture.hwnd), 0);
+        }
     }
     #[test]
     fn never_visible_controls_expose_semantics_without_unmasking_native_inventory_value() {
