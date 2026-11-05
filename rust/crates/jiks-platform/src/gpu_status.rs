@@ -124,7 +124,7 @@ pub trait StatusTransport {
     fn connected_display_count(&mut self) -> Result<u32>;
 }
 
-fn coproc(t: &mut impl StatusTransport) -> Result<u8> {
+pub(crate) fn coproc(t: &mut impl StatusTransport) -> Result<u8> {
     for (bytes, version) in [(108, 8), (96, 7)] {
         let mut p = AbiBuffer::new(bytes, version);
         match t.coproc_info(&mut p) {
@@ -140,7 +140,7 @@ fn coproc(t: &mut impl StatusTransport) -> Result<u8> {
     Err(NvStatus(-9).into())
 }
 
-fn active_count(t: &mut impl StatusTransport) -> Result<u32> {
+pub(crate) fn active_application_pids(t: &mut impl StatusTransport) -> Result<Vec<u32>> {
     let mut apps = vec![ActiveApplication::default(); MAX_APPLICATIONS];
     let mut count = apps.len() as u32;
     t.active_applications(&mut apps, &mut count)?;
@@ -148,7 +148,7 @@ fn active_count(t: &mut impl StatusTransport) -> Result<u32> {
         count as usize <= apps.len(),
         "NVAPI active application count exceeds packet capacity"
     );
-    let mut active = 0;
+    let mut active = Vec::new();
     for app in apps.iter().take(count as usize) {
         ensure!(
             app.version == APPLICATION_VERSION,
@@ -169,11 +169,19 @@ fn active_count(t: &mut impl StatusTransport) -> Result<u32> {
             app.process_id > 0 && app.process_id <= i32::MAX as u32,
             "NVAPI active application has an invalid process ID"
         );
-        if t.process_exists(app.process_id)? {
-            active += 1;
-        }
+        active.push(app.process_id);
     }
     Ok(active)
+}
+
+fn active_count(t: &mut impl StatusTransport) -> Result<u32> {
+    let mut count = 0;
+    for pid in active_application_pids(t)? {
+        if t.process_exists(pid)? {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 /// Uses current observations only. A failed query is retained verbatim and

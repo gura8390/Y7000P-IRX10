@@ -1,6 +1,9 @@
 //! A normal local inventory dialog. It consumes one cached metadata document;
 //! no Win32 message path performs a device query or filesystem operation.
 use super::{a11y, native::*};
+use super::scrolling::{
+    SCROLL_TIMER, ScrollChild, ScrollMessages, Scrolling, Viewport, install_wheel_routing,
+};
 use crate::ui_model::*;
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
@@ -35,8 +38,9 @@ struct Dialog {
     brush: HBRUSH,
     surface_brush: HBRUSH,
     overview: bool,
-    overview_cards: Vec<(HWND, HWND)>,
+    overview_cards: Vec<(ScrollChild, ScrollChild)>,
     scroll: i32,
+    scrolling: Scrolling,
     dpi: i32,
     groups: Vec<Value>,
     selected: usize,
@@ -142,6 +146,7 @@ pub(super) fn open(parent: HWND, bridge: UiBridge) -> Result<()> {
             overview: true,
             overview_cards: vec![],
             scroll: 0,
+            scrolling: Scrolling::default(),
             dpi: dpi as i32,
             groups: vec![],
             selected: 0,
@@ -163,7 +168,7 @@ pub(super) fn open(parent: HWND, bridge: UiBridge) -> Result<()> {
         let hwnd = CreateWindowExW(
             WS_EX_DLGMODALFRAME,
             class.as_ptr(),
-            wide(&super::i18n::tr("设备信息 · 机控")).as_ptr(),
+            wide(&super::i18n::tr("设备信息 · 拯救者工具箱")).as_ptr(),
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VSCROLL,
             (rect.left + (rect.right - rect.left - width) / 2).max(0),
             (rect.top + (rect.bottom - rect.top - height) / 2).max(0),
@@ -177,12 +182,17 @@ pub(super) fn open(parent: HWND, bridge: UiBridge) -> Result<()> {
         if hwnd.is_null() {
             bail!("无法打开设备信息：{}", GetLastError());
         }
+        super::native::apply_window_chrome(hwnd);
         EnableWindow(parent, 0);
         ShowWindow(hwnd, SW_SHOWNORMAL);
         SetForegroundWindow(hwnd);
         let mut msg: MSG = zeroed();
+        let mut messages = ScrollMessages::default();
         while IsWindow(hwnd) != 0 {
-            let result = GetMessageW(&mut msg, null_mut(), 0, 0);
+            let timer = state.try_borrow().ok().and_then(|dialog| dialog.scrolling.wait_timer());
+            let Some(result) = messages.next(hwnd, &mut msg, timer) else {
+                continue;
+            };
             if result <= 0 {
                 if result == 0 {
                     PostQuitMessage(msg.wParam as i32);
@@ -243,6 +253,7 @@ impl Dialog {
                 null(),
             );
             SendMessageW(hwnd, WM_SETFONT, self.font as usize, 1);
+            install_wheel_routing(hwnd, class);
             if class == "STATIC" {
                 install_label_paint(hwnd);
             }
@@ -383,7 +394,10 @@ impl Dialog {
                 );
                 presentation_flag(title, "Jiks.Surface", true);
                 presentation_flag(body, "Jiks.Surface", true);
-                self.overview_cards.push((title, body));
+                self.overview_cards.push((
+                    ScrollChild::new(title, [0; 4], 28, false),
+                    ScrollChild::new(body, [0; 4], 136, false),
+                ));
             }
             self.layout();
             self.refresh();
@@ -418,64 +432,40 @@ impl Dialog {
                     1,
                 );
             }
-            let columns = if w >= 800 { 3 } else { 2 };
-            let rows = (self.overview_cards.len() as i32 + columns - 1) / columns;
-            let card_width = (w - 40 - (columns - 1) * 12) / columns;
-            let viewport = (h - 226).max(80);
-            let card_height = 204;
-            let content = rows * (card_height + 12) - 12;
-            let maximum = if self.overview {
-                (content - viewport).max(0)
-            } else {
-                0
-            };
-            self.scroll = self.scroll.clamp(0, maximum);
-            let info = SCROLLINFO {
-                cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
-                fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
-                nMin: 0,
-                nMax: if self.overview { content } else { 0 },
-                nPage: viewport as u32,
-                nPos: self.scroll,
-                nTrackPos: 0,
-            };
-            SetScrollInfo(self.hwnd, SB_VERT, &info, 1);
-            for (index, (title, body)) in self.overview_cards.iter().enumerate() {
-                let x = 20 + (index as i32 % columns) * (card_width + 12);
-                let y = 96 + (index as i32 / columns) * (card_height + 12) - self.scroll;
-                for (hwnd, offset, height) in [(*title, 16, 28), (*body, 54, 136)] {
-                    MoveWindow(
-                        hwnd,
-                        self.s(x + 16),
-                        self.s(y + offset),
-                        self.s(card_width - 32),
-                        self.s(height),
-                        1,
-                    );
-                    let visible = clip_to_viewport(
-                        hwnd,
-                        y + offset,
-                        card_width - 32,
-                        height,
-                        90,
-                        h - 126,
-                        self.dpi as u32,
-                    );
-                    ShowWindow(
-                        hwnd,
-                        if self.overview && visible {
-                            SW_SHOWNA
-                        } else {
-                            SW_HIDE
-                        },
-                    );
-                }
-            }
+            self.position_overview();
             ShowWindow(
                 GetDlgItem(self.hwnd, BODY),
                 if self.overview { SW_HIDE } else { SW_SHOWNA },
             );
             InvalidateRect(self.hwnd, null(), 1);
+        }
+    }
+    unsafe fn position_overview(&mut self) {
+        unsafe {
+            let mut rect: RECT = zeroed();
+            GetClientRect(self.hwnd, &mut rect);
+            let w = rect.right * 96 / self.dpi;
+            let h = rect.bottom * 96 / self.dpi;
+            let columns = if w >= 800 { 3 } else { 2 };
+            let rows = (self.overview_cards.len() as i32 + columns - 1) / columns;
+            let card_width = (w - 40 - (columns - 1) * 12) / columns;
+            for (index, (title, body)) in self.overview_cards.iter_mut().enumerate() {
+                let x = 20 + (index as i32 % columns) * (card_width + 12);
+                let y = 96 + (index as i32 / columns) * 216;
+                title.rect = [x + 16, y + 16, card_width - 32, 28];
+                body.rect = [x + 16, y + 54, card_width - 32, 136];
+            }
+            self.scrolling.place(
+                self.hwnd,
+                &mut self.scroll,
+                Viewport {
+                    bounds: if self.overview { [16, 90, w - 16, h - 126] } else { [0; 4] },
+                    extent: if self.overview { rows * 216 - 12 } else { 0 },
+                    page: (h - 226).max(80),
+                    dpi: self.dpi as u32,
+                },
+                self.overview_cards.iter_mut().flat_map(|(title, body)| [title, body]),
+            );
         }
     }
     unsafe fn paint(&self, dc: HDC) {
@@ -567,9 +557,9 @@ impl Dialog {
                         .and_then(|group| group.get("title"))
                         .and_then(Value::as_str)
                         .unwrap_or(["设备", "CPU", "显卡", "内存", "磁盘", "BIOS"][index]);
-                    text(*title, &super::i18n::tr(caption));
+                    text(title.hwnd, &super::i18n::tr(caption));
                     text(
-                        *body,
+                        body.hwnd,
                         &group
                             .map(|group| summary_group(group, self.show_private))
                             .unwrap_or_else(|| super::i18n::tr("暂无数据").into_owned()),
@@ -714,6 +704,14 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize
         if msg == WM_PRINT {
             return DefWindowProcW(hwnd, msg, wp, lp);
         }
+        if matches!(msg, WM_CANCELMODE | WM_ENTERSIZEMOVE | WM_ENTERMENULOOP)
+            || (msg == WM_ENABLE && wp == 0)
+        {
+            if let Ok(mut dialog) = (*raw).try_borrow_mut() {
+                dialog.scrolling.cancel(hwnd);
+            }
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
         let destroy = {
             let Ok(mut d) = (*raw).try_borrow_mut() else {
                 return DefWindowProcW(hwnd, msg, wp, lp);
@@ -721,18 +719,28 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize
             match msg {
                 WM_CREATE => d.create(),
                 WM_SIZE => d.layout(),
+                WM_TIMER if wp == SCROLL_TIMER => {
+                    let position = d.scroll;
+                    if let Some(next) = d.scrolling.frame(hwnd, position) {
+                        d.scroll = next;
+                        d.position_overview();
+                    }
+                }
                 WM_TIMER => d.tick(),
                 WM_GETMINMAXINFO => {
                     let info = &mut *(lp as *mut MINMAXINFO);
                     info.ptMinTrackSize.x = d.s(550);
                     info.ptMinTrackSize.y = d.s(420);
                 }
-                WM_CLOSE => d.destroy = true,
+                WM_CLOSE => {
+                    d.scrolling.cancel(hwnd);
+                    d.destroy = true;
+                }
                 WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
                     let on_surface = lp as HWND == GetDlgItem(hwnd, BODY)
                         || d.overview_cards
                             .iter()
-                            .any(|(title, body)| *title == lp as HWND || *body == lp as HWND);
+                            .any(|(title, body)| title.hwnd == lp as HWND || body.hwnd == lp as HWND);
                     SetTextColor(
                         wp as HDC,
                         if lp as HWND == GetDlgItem(hwnd, 26) {
@@ -745,13 +753,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize
                     SetBkColor(wp as HDC, if on_surface { surface() } else { paper() });
                     return (if on_surface { d.surface_brush } else { d.brush }) as isize;
                 }
-                WM_ERASEBKGND => {
-                    let mut rect: RECT = zeroed();
-                    GetClientRect(hwnd, &mut rect);
-                    FillRect(wp as HDC, &rect, d.brush);
-                    d.paint(wp as HDC);
-                    return 1;
-                }
+                WM_ERASEBKGND => return 1,
                 WM_PAINT => {
                     let mut ps: PAINTSTRUCT = zeroed();
                     let dc = BeginPaint(hwnd, &mut ps);
@@ -773,27 +775,24 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize
                     return 1;
                 }
                 WM_MOUSEWHEEL => {
-                    d.scroll -= ((wp >> 16) as u16 as i16 as i32) / 120 * 64;
-                    d.layout();
+                    let position = d.scroll;
+                    if let Some(next) = d.scrolling.wheel(hwnd, position, wp) {
+                        d.scroll = next;
+                        d.position_overview();
+                    }
                 }
-                WM_VSCROLL => {
-                    d.scroll = match (wp & 0xffff) as i32 {
-                        SB_LINEUP => d.scroll - 32,
-                        SB_LINEDOWN => d.scroll + 32,
-                        SB_PAGEUP => d.scroll - 180,
-                        SB_PAGEDOWN => d.scroll + 180,
-                        SB_THUMBTRACK | SB_THUMBPOSITION => {
-                            let mut si: SCROLLINFO = zeroed();
-                            si.cbSize = std::mem::size_of::<SCROLLINFO>() as u32;
-                            si.fMask = SIF_TRACKPOS;
-                            GetScrollInfo(hwnd, SB_VERT, &mut si);
-                            si.nTrackPos
-                        }
-                        _ => d.scroll,
-                    };
-                    d.layout();
+                WM_VSCROLL if lp == 0 => {
+                    let position = d.scroll;
+                    let next = d.scrolling.command(hwnd, position, (wp & 0xffff) as i32);
+                    if next != d.scroll {
+                        d.scroll = next;
+                        d.position_overview();
+                    }
                 }
                 WM_COMMAND => match (wp & 0xffff) as i32 {
+                    GROUPS if ((wp >> 16) & 0xffff) == CBN_DROPDOWN as usize => {
+                        d.scrolling.cancel(hwnd);
+                    }
                     GROUPS if ((wp >> 16) & 0xffff) == CBN_SELCHANGE as usize => {
                         let index = SendMessageW(GetDlgItem(hwnd, GROUPS), CB_GETCURSEL, 0, 0);
                         if index >= 0 {
@@ -801,6 +800,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize
                             if index > 0 {
                                 d.selected = index as usize - 1;
                             }
+                            d.scrolling.cancel(hwnd);
                             d.scroll = 0;
                             d.render_body();
                         }
@@ -813,7 +813,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize
                     REFRESH => d.refresh(),
                     COPY => d.copy(false),
                     COPY_ALL => d.copy(true),
-                    CLOSE => d.destroy = true,
+                    CLOSE => {
+                        d.scrolling.cancel(hwnd);
+                        d.destroy = true;
+                    }
                     _ => return DefWindowProcW(hwnd, msg, wp, lp),
                 },
                 _ => return DefWindowProcW(hwnd, msg, wp, lp),
@@ -904,6 +907,7 @@ mod tests {
                 overview: true,
                 overview_cards: vec![],
                 scroll: 0,
+                scrolling: Scrolling::default(),
                 dpi: 96,
                 groups: vec![],
                 selected: 0,
@@ -1011,6 +1015,7 @@ mod tests {
             overview: true,
             overview_cards: vec![],
             scroll: 0,
+            scrolling: Scrolling::default(),
             dpi: 96,
             groups: vec![
                 json!({"title":"Disk","rows":[{"label":"Serial","value":"SYNTHETIC_PRIVATE_SERIAL","sensitive":true}]}),

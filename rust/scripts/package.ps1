@@ -31,13 +31,13 @@ $peAudit = & (Join-Path $PSScriptRoot 'verify-pe.ps1') -Binary $binaryPath -Expe
 if (!(($peAudit | ConvertFrom-Json).verified)) { throw 'Static PE dependency audit did not pass.' }
 [IO.Directory]::CreateDirectory($outputRoot) | Out-Null
 if ((Get-Item -LiteralPath $outputRoot).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'The output directory cannot be a reparse point.' }
-$packageName = "Jiks-$Label-windows-x64"
+$packageName = "拯救者工具箱-$Label-windows-x64"
 $finalDirectory = Join-Path $outputRoot $packageName
 $finalZip = Join-Path $outputRoot "$packageName.zip"
 if ((Test-Path -LiteralPath $finalDirectory) -or (Test-Path -LiteralPath $finalZip)) { throw 'Package output already exists; select a new directory or label.' }
 # This is an explicit allowlist. No recursive copy of a target/user directory.
 $entries = @(
-    @{ Source = $binaryPath; Name = 'Jiks.exe' },
+    @{ Source = $binaryPath; Name = '拯救者工具箱.exe' },
     @{ Source = (Join-Path $sourceRoot 'LICENSE'); Name = 'LICENSE' },
     @{ Source = (Join-Path $PSScriptRoot 'package-readme.txt'); Name = 'README.txt' },
     @{ Source = (Join-Path $sourceRoot 'THIRD_PARTY_NOTICES.md'); Name = 'THIRD_PARTY_NOTICES.md' },
@@ -100,7 +100,7 @@ $manifestFiles = foreach ($entry in $entries) {
     [ordered]@{ path = $entry.Name; size = (Get-Item -LiteralPath $path).Length; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() }
 }
 $manifest = [ordered]@{
-    application = 'Jiks'; label = $Label; configuration = $Configuration
+    application = '拯救者工具箱'; label = $Label; configuration = $Configuration
     source_revision = $SourceRevision; status = 'release-artifact'
     hardware_acceptance = 'separate-explicit-device-verification'
     packaged_utc = [DateTime]::UtcNow.ToString('o'); files = @($manifestFiles)

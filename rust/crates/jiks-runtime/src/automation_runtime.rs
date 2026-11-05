@@ -943,7 +943,11 @@ pub fn translate_step(step: &StepDto, values: &BTreeMap<String, Value>) -> Resul
                 StepKind::PortsBacklight => ("keys.apply", "keyboard.ports", true),
                 StepKind::PanelLogoBacklight => ("keys.apply", "keyboard.logo", true),
                 StepKind::DeactivateGpu => {
-                    return command("gpu.sleep", "gpu.sleep_action", json!(state));
+                    return match state {
+                        1 => command("gpu.restart.automation", "", Value::Null),
+                        0 => command("gpu.kill_apps.automation", "", Value::Null),
+                        _ => bail!("未知独显自动化动作"),
+                    };
                 }
                 _ => bail!("No semantic route for {kind:?}"),
             };

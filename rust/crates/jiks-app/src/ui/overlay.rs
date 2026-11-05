@@ -267,7 +267,7 @@ fn rows(settings: &Settings, metrics: &[UiMetric]) -> Vec<Row> {
     output
 }
 fn accessible_summary(rows: &[Row], missing: bool) -> String {
-    let mut output = super::i18n::tr("机控 OSD").into_owned();
+    let mut output = super::i18n::tr("拯救者工具箱 OSD").into_owned();
     if missing {
         output.push_str("\n");
         output.push_str(&super::i18n::tr("尚无传感器数据"));
@@ -527,7 +527,7 @@ impl Overlay {
                 let hwnd = CreateWindowExW(
                     WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
                     class.as_ptr(),
-                    wide("机控 OSD").as_ptr(),
+                    wide("拯救者工具箱 OSD").as_ptr(),
                     WS_POPUP,
                     0,
                     0,

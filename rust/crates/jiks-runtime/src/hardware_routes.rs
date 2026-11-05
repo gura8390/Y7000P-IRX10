@@ -13,6 +13,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use jiks_platform::{
     HardwareAction as A, SpectrumAction,
+    charge_threshold::{MAXIMUM as THRESHOLD_MAXIMUM, Threshold},
     display_controls::DisplayAction as D,
     domain::MappedFeature as M,
     energy::{AlwaysOnUsb, ChargeMode, EnergyAction as E},
@@ -1283,20 +1284,7 @@ pub fn plan(command: &str, payload: &Value) -> Result<Vec<A>> {
         }
         "keys.apply" | "speaker.apply" => keys(payload),
         "battery.apply" => {
-            known(
-                payload,
-                &[
-                    "battery.mode",
-                    "battery.night_charge",
-                    "battery.start_threshold",
-                    "battery.stop_threshold",
-                ],
-            )?;
-            ensure!(
-                value(payload, "battery.start_threshold").is_none()
-                    && value(payload, "battery.stop_threshold").is_none(),
-                "Charge thresholds require the separate IBMPmDrv adapter; no partial battery command was planned"
-            );
+            known(payload, &["battery.mode", "battery.night_charge"])?;
             let mut actions = vec![];
             if let Some(v) = value(payload, "battery.mode") {
                 actions.push(A::Energy(E::Battery(battery_mode(v)?)));
@@ -1308,6 +1296,22 @@ pub fn plan(command: &str, payload: &Value) -> Result<Vec<A>> {
                 )?)));
             }
             nonempty(actions)
+        }
+        "battery.threshold.apply" => {
+            let enabled = "battery.threshold_enabled";
+            let start = "battery.start_threshold";
+            let stop = "battery.stop_threshold";
+            known(payload, &[enabled, start, stop])?;
+            let threshold = Threshold {
+                enabled: bool_value(required(payload, enabled)?, enabled)?,
+                start: unsigned(required(payload, start)?, start, THRESHOLD_MAXIMUM)?,
+                stop: unsigned(required(payload, stop)?, stop, THRESHOLD_MAXIMUM)?,
+            };
+            Ok(vec![A::ChargeThreshold(threshold.validate()?)])
+        }
+        "battery.threshold.read" => {
+            known(payload, &[])?;
+            Ok(vec![A::ReadChargeThreshold])
         }
         "power.accessories.apply" => {
             known(
@@ -1413,7 +1417,7 @@ pub fn plan(command: &str, payload: &Value) -> Result<Vec<A>> {
             }])
         }
         "gpu.restart" => {
-            known(payload, &["gpu.instance_id"])?;
+            known(payload, &["gpu.instance_id", "gpu.require_started"])?;
             let nodes = context(payload, "gpu_nodes")
                 .and_then(Value::as_array)
                 .context("Completed NVIDIA PnP inventory is required")?;
@@ -1431,6 +1435,9 @@ pub fn plan(command: &str, payload: &Value) -> Result<Vec<A>> {
             );
             Ok(vec![A::RestartGpu {
                 instance_id: nodes[0].into(),
+                require_started: value(payload, "gpu.require_started")
+                    .map(|v| bool_value(v, "GPU started-state guard"))
+                    .transpose()?.unwrap_or(false),
             }])
         }
         "gpu.processes.refresh" => {
@@ -1888,7 +1895,7 @@ mod tests {
         assert!(plan("gpu.restart", &p).is_err());
         p["gpu.instance_id"] = json!("PCI\\VEN_10DE&DEV_B\\2");
         assert!(
-            matches!(&plan("gpu.restart",&p).unwrap()[0],A::RestartGpu{instance_id}if instance_id.ends_with("\\2"))
+            matches!(&plan("gpu.restart",&p).unwrap()[0],A::RestartGpu{instance_id, require_started: false}if instance_id.ends_with("\\2"))
         );
     }
     #[test]

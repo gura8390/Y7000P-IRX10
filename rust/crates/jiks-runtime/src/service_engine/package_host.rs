@@ -418,7 +418,7 @@ impl Engine {
                             || method
                                 .as_str()
                                 .is_some_and(|name| name.eq_ignore_ascii_case("GitHub"))),
-                    "旧版Server更新接口不发布Rust机控；请在设置选择GitHub"
+                    "旧版Server更新接口不发布Rust拯救者工具箱；请在设置选择GitHub"
                 );
                 let channel = payload
                     .get("channel")
@@ -547,13 +547,13 @@ impl Engine {
                                 state.revision += 1;
                             }
                             if release.newer {
-                                self.queue_notification(json!({"type":"UpdateAvailable","title":"机控更新","text":format!("Jiks {} 可供下载；点击通知查看更新设置",release.version)}))?;
+                                self.queue_notification(json!({"type":"UpdateAvailable","title":"拯救者工具箱更新","text":format!("拯救者工具箱 {} 可供下载；点击通知查看更新设置",release.version)}))?;
                             }
                             self.finish(
                                 message.request_id,
                                 true,
                                 format!(
-                                    "机控版本{}{}",
+                                    "拯救者工具箱版本{}{}",
                                     release.version,
                                     if release.newer {
                                         "可供下载"
@@ -566,7 +566,7 @@ impl Engine {
                             self.finish(
                                 message.request_id,
                                 true,
-                                "尚无符合本机控渠道的公开Rust版本；未将C#版本当成Rust升级",
+                                "尚无符合本拯救者工具箱渠道的公开Rust版本；未将C#版本当成Rust升级",
                             );
                         }
                     }

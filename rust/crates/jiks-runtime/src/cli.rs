@@ -74,7 +74,7 @@ impl InstanceLease {
             let handle = CreateMutexW(null(), 0, key.as_ptr());
             ensure!(
                 !handle.is_null(),
-                "无法创建机控实例锁：{}",
+                "无法创建拯救者工具箱实例锁：{}",
                 std::io::Error::last_os_error()
             );
             if GetLastError() == ERROR_ALREADY_EXISTS {
@@ -123,12 +123,12 @@ pub fn show_existing(root: &Path) -> Result<()> {
             }
             ensure!(
                 started.elapsed() < Duration::from_secs(3),
-                "现有机控尚未创建窗口，请稍候重试"
+                "现有拯救者工具箱尚未创建窗口，请稍候重试"
             );
             std::thread::sleep(Duration::from_millis(20));
         }
         let message = RegisterWindowMessageW(wide("Jiks.ShowExisting.1").as_ptr());
-        ensure!(message != 0, "无法注册显示机控消息");
+        ensure!(message != 0, "无法注册显示拯救者工具箱消息");
         let mut acknowledged = 0usize;
         ensure!(
             SendMessageTimeoutW(
@@ -141,7 +141,7 @@ pub fn show_existing(root: &Path) -> Result<()> {
                 &mut acknowledged
             ) != 0
                 && acknowledged == 1,
-            "现有机控未确认显示，请在托盘重试；未启动第二个后台"
+            "现有拯救者工具箱未确认显示，请在托盘重试；未启动第二个后台"
         );
         Ok(())
     }
@@ -461,7 +461,7 @@ fn request_after_write(
             Err(error) => {
                 ensure!(
                     started.elapsed() < Duration::from_secs(2),
-                    "请先启动机控并在设置中启用CLI；当前没有可连接端点：{error}"
+                    "请先启动拯救者工具箱并在设置中启用CLI；当前没有可连接端点：{error}"
                 );
                 std::thread::sleep(Duration::from_millis(25));
             }
@@ -516,7 +516,7 @@ fn request_after_write(
         }
         ensure!(
             started.elapsed() < Duration::from_secs(90),
-            "CLI等待超时；操作可能仍在后台，请在机控中核对实际状态"
+            "CLI等待超时；操作可能仍在后台，请在拯救者工具箱中核对实际状态"
         );
         std::thread::sleep(Duration::from_millis(20));
     }

@@ -8,15 +8,15 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     mem::{size_of, zeroed},
     ptr,
 };
 use windows_sys::{
     Win32::{
         Devices::DeviceAndDriverInstallation::*,
-        Foundation::{CloseHandle, FILETIME, HANDLE, WAIT_OBJECT_0},
-        System::{Registry::*, Threading::*},
+        Foundation::{CloseHandle, FILETIME, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::{Registry::*, RemoteDesktop::ProcessIdToSessionId, Threading::*},
     },
     core::GUID,
 };
@@ -159,6 +159,7 @@ pub(crate) fn restart(
     _owner: &OwnerToken,
     action: &ExplicitAction,
     instance_id: &str,
+    require_started: bool,
 ) -> Result<Value> {
     ensure!(
         instance_id
@@ -178,6 +179,10 @@ pub(crate) fn restart(
     ensure!(
         before.instance_id.eq_ignore_ascii_case(instance_id),
         "GPU instance changed"
+    );
+    ensure!(
+        !require_started || (before.started && before.problem_code == 0),
+        "Automatic GPU restart requires the same started, healthy PnP device"
     );
     let params = restart_parameters();
     ensure!(
@@ -199,6 +204,7 @@ pub(crate) fn restart(
         std::io::Error::last_os_error()
     );
     let after = node(set.0, &data)?;
+    ensure!(after.instance_id.eq_ignore_ascii_case(instance_id), "GPU identity changed during restart");
     let mut install: SP_DEVINSTALL_PARAMS_W = unsafe { zeroed() };
     install.cbSize = size_of::<SP_DEVINSTALL_PARAMS_W>() as u32;
     ensure!(
@@ -392,7 +398,7 @@ fn open_process(expected: &ProcessIdentity, terminate: bool) -> Result<ProcessHa
     );
     Ok(handle)
 }
-pub fn process_metadata(pid: u32) -> Result<GpuProcess> {
+fn read_identity(pid: u32) -> Result<ProcessIdentity> {
     ensure!(pid > 4, "Invalid system process");
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     ensure!(
@@ -400,7 +406,10 @@ pub fn process_metadata(pid: u32) -> Result<GpuProcess> {
         "GPU process identity permission denied/unavailable"
     );
     let handle = ProcessHandle(handle);
-    let identity = identity(handle.0, pid)?;
+    identity(handle.0, pid)
+}
+pub fn process_metadata(pid: u32) -> Result<GpuProcess> {
+    let identity = read_identity(pid)?;
     let preference = parse_preference(read_preference(&identity.executable)?.as_deref());
     Ok(GpuProcess {
         identity,
@@ -457,6 +466,7 @@ pub fn kill_selected(port: &mut impl ProcessPort, targets: &[ProcessIdentity]) -
 }
 struct NativeProcesses<'a> {
     action: &'a ExplicitAction,
+    automated: bool,
 }
 impl ProcessPort for NativeProcesses<'_> {
     type Prepared = ProcessHandle;
@@ -464,10 +474,35 @@ impl ProcessPort for NativeProcesses<'_> {
         self.action.check_write_boundary()
     }
     fn prepare(&mut self, target: &ProcessIdentity) -> Result<ProcessHandle> {
-        open_process(target, true)
+        let process = open_process(target, true)?;
+        if self.automated {
+            let current = std::env::current_exe()?;
+            ensure!(
+                !current.to_string_lossy().eq_ignore_ascii_case(&target.executable),
+                "保留本工具的前端和后台进程"
+            );
+            let mut own_session = 0;
+            let mut target_session = 0;
+            let mut critical = 0;
+            ensure!(
+                unsafe {
+                    ProcessIdToSessionId(GetCurrentProcessId(), &mut own_session) != 0
+                        && ProcessIdToSessionId(target.pid, &mut target_session) != 0
+                        && IsProcessCritical(process.0, &mut critical) != 0
+                } && own_session == target_session && critical == 0,
+                "保留系统关键进程或其他会话进程"
+            );
+        }
+        Ok(process)
     }
     fn terminate_and_wait(&mut self, process: &ProcessHandle) -> Result<()> {
         self.action.check_write_boundary()?;
+        if self.automated {
+            ensure!(
+                unsafe { WaitForSingleObject(process.0, 0) } == WAIT_TIMEOUT,
+                "原应用已退出或其状态无法核对"
+            );
+        }
         ensure!(
             unsafe { TerminateProcess(process.0, 1) } != 0,
             "TerminateProcess failed: {}",
@@ -487,7 +522,86 @@ pub(crate) fn kill(
     action: &ExplicitAction,
     targets: &[ProcessIdentity],
 ) -> Result<Value> {
-    kill_selected(&mut NativeProcesses { action }, targets)
+    kill_selected(&mut NativeProcesses { action, automated: false }, targets)
+}
+
+#[derive(Debug, Default, Serialize)]
+pub(crate) struct AutomationKillReport {
+    pub completed_pids: Vec<u32>,
+    pub completed_identities: Vec<ProcessIdentity>,
+    pub skipped: BTreeMap<u32, String>,
+    pub failed: BTreeMap<u32, String>,
+    pub stopped: Option<String>,
+}
+
+fn kill_occupied(
+    port: &mut impl ProcessPort,
+    mut read_occupied: impl FnMut() -> Result<Vec<u32>>,
+    read_identity: impl Fn(u32) -> Result<ProcessIdentity>,
+) -> Result<AutomationKillReport> {
+    let mut report = AutomationKillReport::default();
+    port.guard()?;
+    let initial: BTreeSet<_> = read_occupied()?.into_iter().collect();
+    ensure!(initial.len() <= 64, "独显占用应用过多，未执行结束操作");
+    let mut prepared = Vec::new();
+    for pid in initial {
+        if let Err(error) = port.guard() {
+            report.stopped = Some(format!("{error:#}"));
+            return Ok(report);
+        }
+        let result = (|| {
+            let target = read_identity(pid)?;
+            ensure!(target.pid == pid, "应用身份与占用列表 PID 不一致");
+            let file = std::path::Path::new(&target.executable)
+                .file_name().and_then(|value| value.to_str()).context("应用文件名不可核对")?;
+            if ["dwm.exe", "explorer.exe"].iter().any(|name| file.eq_ignore_ascii_case(name)) {
+                return Ok(None);
+            }
+            let handle = port.prepare(&target)?;
+            Ok(Some((target, handle)))
+        })();
+        match result {
+            Ok(Some(prepared_process)) => prepared.push(prepared_process),
+            Ok(None) => (),
+            Err(error) => { report.skipped.insert(pid, format!("{error:#}")); }
+        }
+    }
+    if prepared.is_empty() {
+        return Ok(report);
+    }
+    // Hold the exact process handles before confirming occupancy again. A
+    // PID reused between the first list and metadata lookup cannot authorize
+    // termination unless that very process is on the new list.
+    port.guard()?;
+    let confirmed: BTreeSet<_> = read_occupied()?.into_iter().collect();
+    for (target, handle) in prepared {
+        let pid = target.pid;
+        if let Err(error) = port.guard() {
+            report.stopped = Some(format!("{error:#}"));
+            break;
+        }
+        if !confirmed.contains(&pid) {
+            report.skipped.insert(pid, "应用已离开当次独显占用列表".into());
+        } else if let Err(error) = port.terminate_and_wait(&handle) {
+            report.failed.insert(pid, format!("{error:#}"));
+        } else {
+            report.completed_pids.push(pid);
+            report.completed_identities.push(target);
+        }
+    }
+    Ok(report)
+}
+
+pub(crate) fn kill_automation_apps(
+    _owner: &OwnerToken,
+    action: &ExplicitAction,
+    read_occupied: impl FnMut() -> Result<Vec<u32>>,
+) -> Result<AutomationKillReport> {
+    kill_occupied(
+        &mut NativeProcesses { action, automated: true },
+        read_occupied,
+        read_identity,
+    )
 }
 pub(crate) fn set_preference(
     _owner: &OwnerToken,
@@ -593,10 +707,12 @@ mod tests {
             None
         );
     }
+    #[derive(Default)]
     struct Fake {
         prepared: Vec<u32>,
         killed: Vec<u32>,
         fail_pid: u32,
+        fail_end_pid: u32,
         budget: u32,
     }
     impl ProcessPort for Fake {
@@ -611,6 +727,7 @@ mod tests {
             Ok(p.pid)
         }
         fn terminate_and_wait(&mut self, p: &u32) -> Result<()> {
+            ensure!(*p != self.fail_end_pid, "application exit unconfirmed");
             self.killed.push(*p);
             self.budget -= 1;
             Ok(())
@@ -626,10 +743,9 @@ mod tests {
     #[test]
     fn reused_last_pid_rejects_the_entire_batch_before_any_kill() {
         let mut f = Fake {
-            prepared: vec![],
-            killed: vec![],
             fail_pid: 11,
             budget: 3,
+            ..Default::default()
         };
         assert!(kill_selected(&mut f, &[target(10), target(11)]).is_err());
         assert!(f.killed.is_empty());
@@ -637,10 +753,8 @@ mod tests {
     #[test]
     fn deadline_after_completed_first_process_never_kills_second() {
         let mut f = Fake {
-            prepared: vec![],
-            killed: vec![],
-            fail_pid: 0,
             budget: 1,
+            ..Default::default()
         };
         assert!(kill_selected(&mut f, &[target(10), target(11)]).is_err());
         assert_eq!(f.prepared, vec![10, 11]);
@@ -653,5 +767,46 @@ mod tests {
         let mut p = target(10);
         p.creation_filetime = 0;
         assert!(validate_identities(&[p]).is_err());
+    }
+
+    #[test]
+    fn automation_requires_a_real_list_and_second_occupancy_read_before_termination() {
+        let mut port = Fake { budget: 3, ..Default::default() };
+        let empty = kill_occupied(&mut port, || Ok(vec![]), |pid| Ok(target(pid))).unwrap();
+        assert!(empty.completed_pids.is_empty() && port.prepared.is_empty());
+        assert!(kill_occupied(&mut port, || anyhow::bail!("NVAPI read failed"), |pid| Ok(target(pid))).is_err());
+        let mut lists = [Ok(vec![10]), Err(anyhow::anyhow!("confirmation failed"))].into_iter();
+        assert!(kill_occupied(&mut port, || lists.next().unwrap(), |pid| Ok(target(pid))).is_err());
+        assert_eq!(port.prepared, [10]);
+        assert!(port.killed.is_empty());
+    }
+
+    #[test]
+    fn automation_skips_reused_or_no_longer_occupied_pids_and_cancels_the_tail() {
+        let mut port = Fake { fail_pid: 10, budget: 1, ..Default::default() };
+        let mut lists = [vec![10, 11, 12, 13, 14], vec![10, 12, 13, 14, 15]].into_iter();
+        let result = kill_occupied(&mut port, || Ok(lists.next().unwrap()), |pid| {
+            let mut identity = target(pid);
+            if pid == 14 {
+                identity.executable = r"C:\Windows\explorer.exe".into();
+            }
+            Ok(identity)
+        }).unwrap();
+        assert_eq!(port.prepared, [11, 12, 13]);
+        assert_eq!(port.killed, [12]);
+        assert_eq!(result.completed_identities, [target(12)]);
+        assert_eq!(result.completed_pids, [12]);
+        assert!(result.skipped[&10].contains("PID reused"));
+        assert!(result.skipped.contains_key(&11));
+        assert!(result.stopped.unwrap().contains("expired"));
+    }
+
+    #[test]
+    fn automation_reports_an_unconfirmed_exit_and_continues_other_verified_apps() {
+        let mut port = Fake { fail_end_pid: 11, budget: 3, ..Default::default() };
+        let report = kill_occupied(&mut port, || Ok(vec![10, 11, 12]), |pid| Ok(target(pid))).unwrap();
+        assert_eq!(report.completed_pids, [10, 12]);
+        assert!(report.failed[&11].contains("unconfirmed"));
+        assert!(report.skipped.is_empty() && report.stopped.is_none());
     }
 }

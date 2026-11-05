@@ -355,6 +355,7 @@ impl Engine {
             ("devices".into(), A::ReadDevices, true),
             ("gpu.nodes".into(), A::ReadGpuDeviceNodes, true),
             ("energy".into(), A::ReadEnergy, true),
+            ("battery.threshold".into(), A::ReadChargeThreshold, true),
             ("system".into(), A::ReadSystem, true),
             ("wireless".into(), A::ReadWireless, true),
             ("autorun".into(), A::ReadAutorun, true),
@@ -443,6 +444,7 @@ impl Engine {
             "read.autorun",
             "battery.refresh",
             "battery.history.refresh",
+            "keyboard.candidates",
             "keyboard.effects.import",
             "keyboard.effects.export",
             "startup.arguments.load",
@@ -528,6 +530,8 @@ impl Engine {
             self.read_only || !self.identity_supported,
             conflict.as_deref(),
         );
+        let step_capabilities = (!live)
+            .then(|| automation_host::step_capabilities(&projection, self.read_only));
         crate::sensor_presentation::apply(
             &mut projection.metrics,
             &self.cache,
@@ -554,9 +558,10 @@ impl Engine {
             .retain(|metric| !["Fps", "LowFps", "FrameTime"].contains(&metric.key.as_str()));
         projection.metrics.extend(self.fps.metrics());
         state.metrics = projection.metrics;
-        if !live {
+        if let Some(step_capabilities) = step_capabilities {
             let mut capabilities = state.capabilities.as_ref().clone();
             capabilities.extend(projection.capabilities);
+            capabilities.extend(step_capabilities);
             state.capabilities = Arc::new(capabilities);
             let mut options = state.options.as_ref().clone();
             options.extend(projection.options);
@@ -761,6 +766,13 @@ impl Engine {
             self.pending.is_none(),
             "上一个物理操作尚未返回，不能提交新的设备命令"
         );
+        ensure!(
+            !self.reading.as_ref().is_some_and(|read| read.key == "battery.threshold")
+                || !actions
+                    .iter()
+                    .any(|action| matches!(action, A::ChargeThreshold(_))),
+            "充电阈值读取尚未返回，请稍后再应用"
+        );
         let budget = if actions
             .iter()
             .any(|action| matches!(action, A::SetSoftware { .. } | A::BootLogo(_)))
@@ -892,7 +904,7 @@ impl Engine {
                             return Ok(());
                         }
                         if !matches!(pending.work.after, After::SnapshotRead { .. }) {
-                            self.publish_native(true)?;
+                            self.publish_native(!matches!(pending.action, A::ChargeThreshold(_) | A::KillGpuApps { .. }))?;
                         }
                         pending.work.last = value;
                         if pending.work.late || self.shutdown.is_some() || self.faulted {
@@ -920,6 +932,18 @@ impl Engine {
         Ok(())
     }
     fn failed(&mut self, work: Work, error: anyhow::Error) -> Result<()> {
+        if work.message == "gpu.kill_apps.automation" {
+            self.value("automation.gpu_kill_result", json!({"error":format!("{error:#}")}));
+        }
+        if work.message == "battery.threshold.apply" {
+            self.cache.remove("battery.threshold");
+            self.cache.insert(
+                "error.battery.threshold".into(),
+                json!(format!("{error:#}")),
+            );
+            self.publish_native(false)?;
+            self.enqueue_read("battery.threshold".into(), A::ReadChargeThreshold, false);
+        }
         if work.message == "software.apply" {
             self.enqueue_read("software".into(), A::ReadSoftware, false);
         }
@@ -1005,6 +1029,27 @@ impl Engine {
                 self.finish(id, !work.late, "AI条件策略已实际核对");
             }
             After::Hardware => {
+                if work.message == "gpu.kill_apps.automation" {
+                    let count = |key: &str| work.last.get(key).and_then(Value::as_object).map_or(0, |v| v.len());
+                    let completed = work.last["completed_pids"].as_array().map_or(0, Vec::len);
+                    let (skipped, failed) = (count("skipped"), count("failed"));
+                    let stopped = work.last["stopped"].as_str();
+                    let mut public = work.last.clone();
+                    if let Some(report) = public.as_object_mut() {
+                        report.remove("completed_identities");
+                    }
+                    self.value("automation.gpu_kill_result", public);
+                    self.finish(
+                        id,
+                        !work.late && skipped == 0 && failed == 0 && stopped.is_none(),
+                        format!(
+                            "独显应用已核对退出 {completed} 个，跳过 {skipped} 个，失败 {failed} 个{}",
+                            stopped.map_or(String::new(), |reason| format!("；已停止：{reason}"))
+                        ),
+                    );
+                    self.queue_discovery();
+                    return Ok(());
+                }
                 if work.message.starts_with("keyboard.")
                     && work.last.get("profile").and_then(Value::as_u64).is_some()
                     && work.last.get("effects").is_some_and(Value::is_array)
@@ -1013,11 +1058,15 @@ impl Engine {
                         .insert("keyboard.effects".into(), work.last.clone());
                     self.publish_native(false)?;
                 }
+                let restart_needs_reboot = work.message == "gpu.restart.automation"
+                    && work.last.get("pending_reboot").and_then(Value::as_bool) == Some(true);
                 self.finish(
                     id,
-                    !work.late,
+                    !work.late && !restart_needs_reboot,
                     if work.late {
                         "设备操作已返回；请求超时或已取消，未补发剩余计划"
+                    } else if restart_needs_reboot {
+                        "系统接收了独显重启请求，但仍需重启 Windows；本步未确认完成"
                     } else {
                         "设备操作已逐项核对"
                     },
@@ -1168,8 +1217,12 @@ impl Engine {
                         }
                         Err(error) => {
                             self.cache.remove(&reading.key);
-                            self.cache
-                                .insert(format!("error.{}", reading.key), json!(error.to_string()));
+                            let message = if reading.key == "battery.threshold" {
+                                format!("{error:#}")
+                            } else {
+                                error.to_string()
+                            };
+                            self.cache.insert(format!("error.{}", reading.key), json!(message));
                             if reading.key == "temperature" {
                                 self.last_temperature = None;
                             }
@@ -1229,7 +1282,21 @@ impl Engine {
             state.revision += 1;
         }
         if self.reading.is_none() && self.shutdown.is_none() {
-            if let Some((key, action, initial)) = self.read_queue.pop_front() {
+            let writing_threshold = self
+                .pending
+                .as_ref()
+                .is_some_and(|work| matches!(work.action, A::ChargeThreshold(_)));
+            // Registry fields are individually visible during the legacy
+            // driver transaction. Unrelated reads may still use this worker.
+            let next = if writing_threshold {
+                self.read_queue
+                    .iter()
+                    .position(|(key, _, _)| key != "battery.threshold")
+                    .and_then(|index| self.read_queue.remove(index))
+            } else {
+                self.read_queue.pop_front()
+            };
+            if let Some((key, action, initial)) = next {
                 match self
                     .reader
                     .dispatch(action, ExplicitAction::new("只读状态采样")?)
@@ -1772,6 +1839,13 @@ impl Engine {
                 "app.preferences.save" => self.request_app_preferences(id, &payload)?,
                 "read.boot_logo" => self.request_read(id, "boot_logo".into(), A::ReadBootLogo)?,
                 "read.autorun" => self.request_read(id, "autorun".into(), A::ReadAutorun)?,
+                "battery.threshold.read" => {
+                    let action = hardware_routes::plan(&command, &payload)?
+                        .into_iter()
+                        .next()
+                        .context("缺少充电阈值读取操作")?;
+                    self.request_read(id, "battery.threshold".into(), action)?;
+                }
                 "keys.discover.start" | "keys.discover.stop" | "keys.retry_cleanup" => {
                     self.request_keys(id, &command)?
                 }
@@ -1972,7 +2046,14 @@ impl Engine {
                                 json!(monotonic_ms().saturating_add(60000));
                         }
                         let actions = hardware_routes::plan(&command, &payload)?;
-                        self.start_work(id, &command, actions, after)?;
+                        let operation = if command == "gpu.restart"
+                            && payload.get("gpu.require_started").and_then(Value::as_bool) == Some(true)
+                        {
+                            "gpu.restart.automation"
+                        } else {
+                            &command
+                        };
+                        self.start_work(id, operation, actions, after)?;
                     }
                 }
             },
@@ -2897,6 +2978,7 @@ mod lifecycle_tests {
                 | A::ReadDevices
                 | A::ReadGpuDeviceNodes
                 | A::ReadEnergy
+                | A::ReadChargeThreshold
                 | A::ReadSystem
                 | A::ReadWireless
                 | A::ReadAutorun
@@ -3194,6 +3276,85 @@ mod lifecycle_tests {
         assert!(f.engine.take_internal_result(id).unwrap().is_ok());
         assert!(f.engine.read_receipts.remove(&id).is_some());
         assert_eq!(f.engine.cache["cpu"]["raw_mode"], 255);
+    }
+    #[test]
+    fn battery_threshold_uses_native_readback_and_invalidates_a_mismatched_receipt() {
+        let mut f = Fixture::new();
+        let target = json!({
+            "battery.threshold_enabled": true,
+            "battery.start_threshold": 50,
+            "battery.stop_threshold": 80
+        });
+        let read = f.answer();
+        f.engine
+            .process(Command::Execute {
+                request_id: 41,
+                command: "battery.threshold.read".into(),
+                payload: json!({}),
+            })
+            .unwrap();
+        f.engine.poll_read().unwrap();
+        assert!(matches!(
+            f.log.lock().unwrap().last(),
+            Some(A::ReadChargeThreshold)
+        ));
+        assert!(
+            f.engine
+                .process(Command::Execute {
+                    request_id: 44,
+                    command: "battery.threshold.apply".into(),
+                    payload: target.clone(),
+                })
+                .is_err()
+        );
+        let original = json!({"state":{"enabled":false,"start":40,"stop":60},"reason":null});
+        *read.lock().unwrap() = Some(Ok(original.clone()));
+        f.engine.poll_read().unwrap();
+        let initial = f.engine.state.lock().unwrap();
+        assert_eq!(initial.values["battery.start_threshold"], json!(40));
+        assert!(initial.capabilities["battery.threshold.apply"].available);
+        drop(initial);
+
+        let applied = f.answer();
+        f.engine
+            .process(Command::Execute {
+                request_id: 42,
+                command: "battery.threshold.apply".into(),
+                payload: target,
+            })
+            .unwrap();
+        assert!(matches!(
+            f.log.lock().unwrap().last(),
+            Some(A::ChargeThreshold(target)) if target.start == 50
+        ));
+        let reread = f.answer();
+        f.engine
+            .process(Command::Execute {
+                request_id: 43,
+                command: "battery.threshold.read".into(),
+                payload: json!({}),
+            })
+            .unwrap();
+        f.engine.poll_read().unwrap();
+        assert!(f.engine.reading.is_none());
+        *applied.lock().unwrap() = Some(Ok(original));
+        f.engine.poll_write().unwrap();
+        let rejected = f.engine.state.lock().unwrap();
+        assert!(!rejected.results.back().unwrap().ok);
+        assert!(rejected.values["battery.start_threshold"].is_null());
+        assert!(!rejected.capabilities["battery.threshold.apply"].available);
+        drop(rejected);
+
+        f.engine.poll_read().unwrap();
+        *reread.lock().unwrap() = Some(Ok(json!({"state":null,"reason":"本机没有 IBMPmDrv"})));
+        f.engine.poll_read().unwrap();
+        let unsupported = f.engine.state.lock().unwrap();
+        assert!(unsupported.values["battery.start_threshold"].is_null());
+        assert_eq!(
+            unsupported.capabilities["battery.threshold.apply"].reason,
+            "本机没有 IBMPmDrv"
+        );
+        assert!(unsupported.capabilities["battery.threshold.read"].available);
     }
     #[test]
     fn malformed_shutdown_acknowledgement_cannot_release_exit_gate() {

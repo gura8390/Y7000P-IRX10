@@ -19,13 +19,16 @@ mod spectrum_editor;
 use super::a11y;
 use super::catalog::{AUTOMATION_ACTIONS, AUTOMATION_TRIGGERS, EditorKind};
 use super::native::*;
+use super::scrolling::{
+    SCROLL_TIMER, ScrollChild, ScrollMessages, Scrolling, Viewport, install_wheel_routing,
+};
 use super::selectors::{self, FileFilter, PickerKind};
 use crate::ui_model::*;
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::mem::{size_of, zeroed};
+use std::mem::zeroed;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -38,6 +41,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnab
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const SAVE: u16 = 1;
+const SS_NOPREFIX: u32 = 0x0080;
 const CANCEL: u16 = 2;
 const EDITOR_TAB: u16 = 10;
 const ACTION_TYPE: u16 = 20;
@@ -230,11 +234,6 @@ struct Edit {
     hwnd: HWND,
     kind: Kind,
 }
-struct Placement {
-    hwnd: HWND,
-    rect: [i32; 4],
-    clip_height: i32,
-}
 struct Slider {
     key: String,
     slider: HWND,
@@ -310,7 +309,7 @@ struct Editor {
     data: Value,
     drafts: BTreeMap<String, Value>,
     edits: Vec<Edit>,
-    placements: Vec<Placement>,
+    placements: Vec<ScrollChild>,
     sliders: Vec<Slider>,
     body_buttons: Vec<(HWND, String)>,
     status: HWND,
@@ -333,6 +332,7 @@ struct Editor {
     recording_stop: RecordingStop,
     recording_revision: u64,
     scroll: i32,
+    scrolling: Scrolling,
     content_height: i32,
     deferred_destroy: bool,
     deferred_picker: Option<PickerRequest>,
@@ -413,8 +413,12 @@ pub(super) fn document(parent: HWND, bridge: UiBridge, id: String) -> Result<()>
     }
     let model = snapshot(&bridge);
     if id == "spectrum_keyboard" {
-        let effects = spectrum_editor::cached(&model);
-        let profile = model.value("keyboard.profile");
+        let profile = ["keyboard.profile", "keyboard.effects_profile"]
+            .into_iter()
+            .map(|key| model.value(key))
+            .find(|value| value.as_u64().is_some_and(|profile| (1..=6).contains(&profile)))
+            .unwrap_or(Value::Null);
+        let effects = spectrum_editor::cached(&model, &profile);
         return open(
             parent,
             bridge,
@@ -561,6 +565,7 @@ fn open(parent: HWND, bridge: UiBridge, mode: Mode, data: Value) -> Result<()> {
             recording_stop: RecordingStop::default(),
             recording_revision: 0,
             scroll: 0,
+            scrolling: Scrolling::default(),
             content_height: 0,
             deferred_destroy: false,
             deferred_picker: None,
@@ -616,14 +621,19 @@ fn open(parent: HWND, bridge: UiBridge, mode: Mode, data: Value) -> Result<()> {
             drop(Box::from_raw(raw));
             bail!("无法打开编辑窗口：{}", GetLastError());
         }
+        super::native::apply_window_chrome(hwnd);
         let accessibility_key = (*raw).borrow().mode.accessibility_key();
         a11y::annotate(hwnd, &accessibility_key, None, None);
         EnableWindow(parent, 0);
         ShowWindow(hwnd, SW_SHOWNORMAL);
         SetForegroundWindow(hwnd);
         let mut msg: MSG = zeroed();
+        let mut messages = ScrollMessages::default();
         while IsWindow(hwnd) != 0 {
-            let result = GetMessageW(&mut msg, null_mut(), 0, 0);
+            let timer = (*raw).try_borrow().ok().and_then(|editor| editor.scrolling.wait_timer());
+            let Some(result) = messages.next(hwnd, &mut msg, timer) else {
+                continue;
+            };
             if result <= 0 {
                 if result == 0 {
                     PostQuitMessage(msg.wParam as i32);
@@ -952,11 +962,21 @@ unsafe fn editor_message(e: &mut Editor, msg: u32, wp: usize, lp: isize) -> Opti
                 info.ptMinTrackSize.y = e.s(430);
                 Some(0)
             }
+            WM_ENABLE | WM_CANCELMODE | WM_ENTERSIZEMOVE | WM_ENTERMENULOOP
+                if msg != WM_ENABLE || wp == 0 =>
+            {
+                e.scrolling.cancel(e.hwnd);
+                None
+            }
             WM_COMMAND => {
                 if !e.rendering {
                     let id = (wp & 0xffff) as u16;
                     let notification = ((wp >> 16) & 0xffff) as u16;
+                    if lp != 0 && matches!(u32::from(notification), BN_CLICKED | CBN_DROPDOWN) {
+                        e.scrolling.cancel(e.hwnd);
+                    }
                     if let Err(error) = e.command(id, notification) {
+                        e.scrolling.cancel(e.hwnd);
                         text(e.status, &format!("{error:#}"));
                         message(e.hwnd, "请检查输入", &format!("{error:#}"), true);
                     }
@@ -979,29 +999,26 @@ unsafe fn editor_message(e: &mut Editor, msg: u32, wp: usize, lp: isize) -> Opti
                 }
                 Some(0)
             }
-            WM_VSCROLL => {
-                let code = (wp & 0xffff) as i32;
-                let old = e.scroll;
-                e.scroll = match code {
-                    SB_LINEUP => old - 32,
-                    SB_LINEDOWN => old + 32,
-                    SB_PAGEUP => old - 220,
-                    SB_PAGEDOWN => old + 220,
-                    SB_THUMBPOSITION | SB_THUMBTRACK => {
-                        let mut info: SCROLLINFO = zeroed();
-                        info.cbSize = size_of::<SCROLLINFO>() as u32;
-                        info.fMask = SIF_TRACKPOS;
-                        GetScrollInfo(e.hwnd, SB_VERT, &mut info);
-                        info.nTrackPos
-                    }
-                    _ => old,
-                };
-                e.position();
+            WM_VSCROLL if lp == 0 => {
+                let next = e.scrolling.command(e.hwnd, e.scroll, (wp & 0xffff) as i32);
+                if next != e.scroll {
+                    e.scroll = next;
+                    e.position();
+                }
                 Some(0)
             }
             WM_MOUSEWHEEL => {
-                e.scroll -= ((wp >> 16) as u16 as i16 as i32) / 120 * 64;
-                e.position();
+                if let Some(next) = e.scrolling.wheel(e.hwnd, e.scroll, wp) {
+                    e.scroll = next;
+                    e.position();
+                }
+                Some(0)
+            }
+            WM_TIMER if wp == SCROLL_TIMER => {
+                if let Some(next) = e.scrolling.frame(e.hwnd, e.scroll) {
+                    e.scroll = next;
+                    e.position();
+                }
                 Some(0)
             }
             WM_TIMER => {
@@ -1031,13 +1048,7 @@ unsafe fn editor_message(e: &mut Editor, msg: u32, wp: usize, lp: isize) -> Opti
                 SetBkColor(wp as HDC, if on_surface { surface() } else { paper() });
                 Some((if on_surface { e.surface_brush } else { e.brush }) as isize)
             }
-            WM_ERASEBKGND => {
-                let mut rect: RECT = zeroed();
-                GetClientRect(e.hwnd, &mut rect);
-                FillRect(wp as HDC, &rect, e.brush);
-                e.paint_cards(wp as HDC);
-                Some(1)
-            }
+            WM_ERASEBKGND => Some(1),
             WM_PAINT => {
                 let mut ps: PAINTSTRUCT = zeroed();
                 let dc = BeginPaint(e.hwnd, &mut ps);
@@ -1050,6 +1061,7 @@ unsafe fn editor_message(e: &mut Editor, msg: u32, wp: usize, lp: isize) -> Opti
                 Some(0)
             }
             WM_CLOSE => {
+                e.scrolling.cancel(e.hwnd);
                 e.close();
                 Some(0)
             }
@@ -1335,11 +1347,13 @@ impl Editor {
                 ],
                 font,
             );
-            self.placements.push(Placement {
+            install_wheel_routing(hwnd, class);
+            self.placements.push(ScrollChild::new(
                 hwnd,
                 rect,
-                clip_height: if class == "COMBOBOX" { 30 } else { rect[3] },
-            });
+                if class == "COMBOBOX" { 30 } else { rect[3] },
+                false,
+            ));
             if let Some((role, name)) = control_role(id) {
                 let name = if id == STEP_LIST && matches!(self.mode, Mode::Macro) {
                     "事件列表"
@@ -1446,7 +1460,38 @@ impl Editor {
                 _ => 38,
             };
             let editor_x = if width < 650 { 205 } else { 240 };
-            let label_hwnd = self.label(label, y + 3, editor_x - 40, 34, false);
+            let caption = tr(label);
+            let label_width = editor_x - 40;
+            let dc = GetDC(self.hwnd);
+            let label_height = if dc.is_null() {
+                30
+            } else {
+                let old_font = SelectObject(dc, self.font);
+                let mut rect = RECT {
+                    right: self.s(label_width),
+                    ..zeroed()
+                };
+                DrawTextW(
+                    dc,
+                    wide(&caption).as_ptr(),
+                    -1,
+                    &mut rect,
+                    DT_CALCRECT | DT_NOPREFIX | DT_WORDBREAK,
+                );
+                SelectObject(dc, old_font);
+                ReleaseDC(self.hwnd, dc);
+                ((rect.bottom * 96 + self.dpi as i32 - 1) / self.dpi as i32 + 2).clamp(16, 34)
+            };
+            // Center the wrapped label's text block on the first control line.
+            // The label window itself stays inside the row's painted card.
+            let label_hwnd = self.place(
+                "STATIC",
+                &caption,
+                SS_LEFT | SS_NOPREFIX,
+                0,
+                [20, y + (30 - label_height) / 2, label_width, label_height],
+                self.font,
+            );
             a11y::annotate(
                 label_hwnd,
                 &a11y::key(&self.mode.accessibility_key(), "label", key),
@@ -1494,6 +1539,13 @@ impl Editor {
                         self.font,
                     );
                     set_choices(h, options, &value);
+                    let mut rect: RECT = zeroed();
+                    if GetWindowRect(h, &mut rect) != 0
+                        && let Some(placed) = self.placements.last_mut()
+                    {
+                        let height = (rect.bottom - rect.top) * 96 / self.dpi as i32;
+                        placed.rect[1] += (30 - height).max(0) / 2;
+                    }
                     h
                 }
                 Kind::Lines => {
@@ -1546,7 +1598,7 @@ impl Editor {
                         &scalar(&value),
                         WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
                         id,
-                        [editor_x, y, editor_width, 30],
+                        [editor_x, y + 2, editor_width, 26],
                         self.font,
                     );
                     SendMessageW(h, EM_SETLIMITTEXT, 65536, 0);
@@ -1556,7 +1608,7 @@ impl Editor {
             a11y::annotate(
                 h,
                 &a11y::key(&self.mode.accessibility_key(), "field", key),
-                Some(&tr(label)),
+                Some(&caption),
                 None,
             );
             if let Some(picker) = picker {
@@ -1925,42 +1977,18 @@ impl Editor {
     }
     unsafe fn position(&mut self) {
         unsafe {
-            let (_, height) = self.size();
-            let viewport = (height - 120).max(200);
-            let max = (self.content_height - viewport).max(0);
-            self.scroll = self.scroll.clamp(0, max);
-            let si = SCROLLINFO {
-                cbSize: size_of::<SCROLLINFO>() as u32,
-                fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
-                nMin: 0,
-                nMax: self.content_height,
-                nPage: viewport as u32,
-                nPos: self.scroll,
-                nTrackPos: 0,
-            };
-            SetScrollInfo(self.hwnd, SB_VERT, &si, 1);
-            for p in &self.placements {
-                let r = p.rect;
-                let y = r[1] - self.scroll;
-                SetWindowPos(
-                    p.hwnd,
-                    null_mut(),
-                    self.s(r[0]),
-                    self.s(y),
-                    self.s(r[2]),
-                    self.s(r[3]),
-                    SWP_NOZORDER | SWP_NOACTIVATE,
-                );
-                ShowWindow(
-                    p.hwnd,
-                    if clip_to_viewport(p.hwnd, y, r[2], p.clip_height, 12, height - 94, self.dpi) {
-                        SW_SHOWNA
-                    } else {
-                        SW_HIDE
-                    },
-                );
-            }
-            InvalidateRect(self.hwnd, null(), 0);
+            let (width, height) = self.size();
+            self.scrolling.place(
+                self.hwnd,
+                &mut self.scroll,
+                Viewport {
+                    bounds: [0, 12, width, height - 94],
+                    extent: self.content_height,
+                    page: (height - 120).max(200),
+                    dpi: self.dpi,
+                },
+                &mut self.placements,
+            );
         }
     }
     unsafe fn capture(&mut self) {
@@ -3555,6 +3583,7 @@ impl Editor {
                         SendMessageW(GetDlgItem(self.hwnd, 144), CB_GETCURSEL, 0, 0).clamp(0, 42);
                     self.drafts
                         .insert("@notification.selected_type".into(), json!(selected));
+                    self.scrolling.cancel(self.hwnd);
                     self.scroll = 0;
                     self.build();
                 }
@@ -3572,6 +3601,7 @@ impl Editor {
                     self.tab =
                         SendMessageW(GetDlgItem(self.hwnd, EDITOR_TAB as i32), CB_GETCURSEL, 0, 0)
                             .max(0) as usize;
+                    self.scrolling.cancel(self.hwnd);
                     self.scroll = 0;
                     self.build();
                 }
@@ -4270,10 +4300,11 @@ impl Editor {
                             return;
                         }
                         let model = snapshot(&self.bridge);
-                        if let Some(effects) = spectrum_editor::cached(&model) {
+                        let profile = self.value("spectrum.profile");
+                        if let Some(effects) = spectrum_editor::cached(&model, &profile) {
                             self.steps = effects;
                             self.data["Loaded"] = json!(true);
-                            self.data["Profile"] = self.value("spectrum.profile");
+                            self.data["Profile"] = profile;
                             self.selected_step = (!self.steps.is_empty()).then_some(0);
                             self.load_spectrum_effect();
                         }
@@ -4641,6 +4672,14 @@ fn action_parameters(id: &str, model: &UiModel) -> Vec<(String, String, Kind)> {
             choice(model, "gpu.hybrid_mode", vec![]),
         ),
         "battery" => one("value", "充电模式", choice(model, "battery.mode", vec![])),
+        "deactivate_gpu" => one(
+            "value",
+            "独显动作",
+            Kind::Choice(vec![
+                UiChoice::new(tr_static("强制关闭独显占用应用"), 0),
+                UiChoice::new(tr_static("重启独显"), 1),
+            ]),
+        ),
         "macro" => one(
             "value",
             "宏总开关",
@@ -4799,12 +4838,20 @@ fn action_templates(selected: &[String], model: &UiModel) -> Result<Vec<Value>> 
         if !model.can(&capability) {
             bail!("{}", model.unavailable_reason(&capability));
         }
-        templates.push(json!({"type":id,"parameters":{}}));
+        let parameters = if id == "deactivate_gpu" { json!({"value":1}) } else { json!({}) };
+        templates.push(json!({"type":id,"parameters":parameters}));
     }
     Ok(templates)
 }
 fn describe_step(value: &Value) -> String {
     let id = value.get("type").and_then(Value::as_str).unwrap_or("");
+    if id == "deactivate_gpu" {
+        match value.pointer("/parameters/value").and_then(Value::as_i64) {
+            Some(0) => return tr("强制关闭独显占用应用").into_owned(),
+            Some(1) => return tr("重启独显").into_owned(),
+            _ => (),
+        }
+    }
     let label = AUTOMATION_ACTIONS
         .iter()
         .find(|(key, _)| *key == id)

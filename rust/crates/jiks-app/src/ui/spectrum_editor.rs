@@ -28,7 +28,12 @@ fn parse_color(text: &str) -> Result<Value> {
         .map_err(|_| anyhow!("{}", tr_static("颜色请使用 #RRGGBB。")))?;
     Ok(json!({"R":(n>>16)&255,"G":(n>>8)&255,"B":n&255}))
 }
-pub(super) fn cached(model: &UiModel) -> Option<Vec<Value>> {
+pub(super) fn cached(model: &UiModel, profile: &Value) -> Option<Vec<Value>> {
+    if !profile.as_u64().is_some_and(|value| (1..=6).contains(&value))
+        || model.values.get("keyboard.effects_profile") != Some(profile)
+    {
+        return None;
+    }
     model
         .values
         .get("keyboard.effects")
@@ -170,7 +175,9 @@ impl Editor {
             self.label("Spectrum 多灯效与分区", y, width, 32, true);
             y += 42;
             self.label(
-                if self.data.get("Loaded").and_then(Value::as_bool) == Some(true) {
+                if self.data.get("Loaded").and_then(Value::as_bool) == Some(true)
+                    && self.data.get("Profile") == Some(&self.value("spectrum.profile"))
+                {
                     "灯效从后台快照读取。列表后面的灯效覆盖前面重叠的分区；应用后才会改变键盘。"
                 } else {
                     "尚未读取此预设的灯效。可以编辑草稿；读取成功前不能应用。"
@@ -546,6 +553,16 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cached_effects_belong_only_to_the_reported_preset() {
+        let mut model = UiModel::default();
+        model.collections.insert("keyboard.effects".into(), vec![]);
+        assert!(cached(&model, &json!(2)).is_none());
+        model.set_value("keyboard.effects_profile", json!(4));
+        model.set_value("keyboard.profile", json!(2));
+        assert!(cached(&model, &json!(2)).is_none());
+        assert_eq!(cached(&model, &json!(4)), Some(vec![]));
+    }
     #[test]
     fn invalid_colors_and_unsupported_machine_effects_reject() {
         assert!(parse_color("#12345Z").is_err());

@@ -37,7 +37,7 @@ impl FileFilter {
             Self::Executable => ("可执行文件", "*.exe;*.com", Some("exe")),
             Self::Audio => ("WAV 音频文件", "*.wav", Some("wav")),
             Self::Spectrum => ("Spectrum 灯效文件", "*.json", Some("json")),
-            Self::Backup => ("机控设置备份", "*.jiksbackup", Some("jiksbackup")),
+            Self::Backup => ("拯救者工具箱设置备份", "*.jiksbackup", Some("jiksbackup")),
             Self::Image => ("图像文件", "*.png;*.jpg;*.jpeg;*.bmp;*.gif", None),
         }
     }

@@ -1339,7 +1339,8 @@ pub fn parse_updates(
                 continue;
             };
             let lower = name.to_ascii_lowercase();
-            if !(lower.starts_with("jiks-") || lower.starts_with("jiks."))
+            if !(lower.starts_with("jiks-") || lower.starts_with("jiks.")
+                || lower.starts_with("拯救者工具箱-"))
                 || !(lower.ends_with(".zip") || lower.ends_with(".exe"))
             {
                 continue;

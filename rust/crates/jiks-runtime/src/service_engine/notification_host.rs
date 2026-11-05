@@ -181,7 +181,6 @@ fn current(engine: &Engine) -> BTreeMap<String, Value> {
     if let Some(profile) = engine
         .cache
         .get("keyboard.active_profile")
-        .or_else(|| engine.cache.get("keyboard.effects"))
         .and_then(|v| v.get("profile"))
         .and_then(Value::as_u64)
         .filter(|v| *v <= 6)

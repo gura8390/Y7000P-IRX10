@@ -4,6 +4,7 @@ use std::{env, fs, path::PathBuf, process::Command};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=assets/jiks.ico");
     println!("cargo:rustc-check-cfg=cfg(jiks_benchmark_fixture)");
     for name in [
         "JIKS_RC",
@@ -31,7 +32,7 @@ fn main() {
     let description = if fixture {
         "Jiks isolated benchmark fixture - no production entry"
     } else {
-        "Jiks Y7000P IRX10 native manager"
+        "拯救者工具箱"
     };
     let level = if release && !fixture {
         "requireAdministrator"
@@ -60,16 +61,20 @@ fn main() {
     );
     let manifest_path = out.join("Jiks.manifest");
     fs::write(&manifest_path, manifest).expect("Write application manifest");
+    let icon_path = out.join("Jiks.ico");
+    fs::write(&icon_path, include_bytes!("assets/jiks.ico")).expect("Write application icon");
     let rc = out.join("Jiks.rc");
     let manifest_name = manifest_path
         .to_string_lossy()
         .replace('\\', "/")
         .replace('"', "\"\"");
+    let icon_name = icon_path.to_string_lossy().replace('\\', "/").replace('"', "\"\"");
     fs::write(
         &rc,
         format!(
             r#"#pragma code_page(65001)
 1 24 "{manifest_name}"
+101 ICON "{icon_name}"
 1 VERSIONINFO
  FILEVERSION {major},{minor},{patch},0
  PRODUCTVERSION {major},{minor},{patch},0
@@ -82,12 +87,12 @@ BEGIN
  BEGIN
   BLOCK "040904b0"
   BEGIN
-   VALUE "CompanyName", "Jiks contributors\0"
+   VALUE "CompanyName", "Lenovo Legion Toolkit contributors\0"
    VALUE "FileDescription", "{description}\0"
    VALUE "FileVersion", "{version}.0\0"
    VALUE "InternalName", "Jiks\0"
-   VALUE "OriginalFilename", "Jiks.exe\0"
-   VALUE "ProductName", "Jiks\0"
+   VALUE "OriginalFilename", "拯救者工具箱.exe\0"
+   VALUE "ProductName", "拯救者工具箱\0"
    VALUE "ProductVersion", "{version}\0"
   END
  END

@@ -2,6 +2,9 @@ use super::i18n::{tr, tr_static};
 use crate::ui_model::{UiChoice, UiModel};
 use serde_json::{Value, json};
 
+#[path = "keyboard_page.rs"]
+mod keyboard_page;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Dashboard,
@@ -15,6 +18,7 @@ pub enum Page {
     About,
     Performance,
     Display,
+    Graphics,
 }
 impl Page {
     pub const ALL: [Self; 9] = [
@@ -39,8 +43,9 @@ impl Page {
             Self::Settings => "设置",
             Self::Donate => "赞助",
             Self::About => "关于",
-            Self::Performance => "性能",
+            Self::Performance => "性能与温控",
             Self::Display => tr_static("显示"),
+            Self::Graphics => "独立显卡",
         })
     }
     pub fn key(self) -> &'static str {
@@ -56,6 +61,7 @@ impl Page {
             Self::About => "about",
             Self::Performance => "performance",
             Self::Display => "display",
+            Self::Graphics => "graphics",
         }
     }
 }
@@ -95,6 +101,7 @@ pub enum ActionKind {
         fresh: bool,
     },
     Document(&'static str),
+    Navigate(Page),
     SensorSettings,
     Cancel(Vec<&'static str>),
 }
@@ -196,6 +203,9 @@ fn doc(label: &'static str, document: &'static str) -> Action {
         kind: ActionKind::Document(document),
     }
 }
+fn navigate(label: &'static str, page: Page) -> Action {
+    Action { accessibility_role: "navigate", label: tr_static(label), capability: "", kind: ActionKind::Navigate(page) }
+}
 fn cancel(fields: &[&'static str]) -> Action {
     Action {
         accessibility_role: "cancel",
@@ -213,12 +223,12 @@ pub fn sections(page: Page, tools_tab: usize, model: &UiModel) -> Vec<Section> {
             Section {
                 title: tr_static("性能模式").into(),
                 hint: tr_static(
-                    "只列出本机已验证支持的模式。切换自定义模式可能应用完整预设，请先检查预算。",
+                    "选择性能模式，也可使用 Fn + Q 快速切换。",
                 ),
                 fields: vec![
                     field(
                         "power.mode",
-                        "模式",
+                        "性能模式",
                         choices(&[
                             ("安静", "1"),
                             ("均衡", "2"),
@@ -367,7 +377,7 @@ pub fn sections(page: Page, tools_tab: usize, model: &UiModel) -> Vec<Section> {
                 hint: tr_static("独显直连等切换可能需要重启；后台确认支持与重启要求后执行。"),
                 fields: vec![field(
                     "gpu.hybrid_mode",
-                    "工作模式",
+                    "显卡工作模式",
                     Choice(vec![]),
                     "gpu.hybrid.apply",
                 )],
@@ -404,19 +414,19 @@ pub fn sections(page: Page, tools_tab: usize, model: &UiModel) -> Vec<Section> {
                         "gpu.keep_awake",
                         "保持独显唤醒",
                         Toggle,
-                        "gpu.settings.save",
+                        "gpu.keep_awake.apply",
                     ),
                     field(
                         "gpu.locked_pstate",
                         "锁定性能状态",
                         Choice(vec![UiChoice::new(tr_static("自动"), -1)]),
-                        "gpu.settings.save",
+                        "gpu.pstate.apply",
                     ),
                     field("gpu.poll_ms", "轮询间隔 · ms", Number, "gpu.settings.save"),
                 ],
                 actions: vec![
                     confirmed(
-                        "读取独显库存",
+                        "检测独立显卡",
                         "gpu.refresh",
                         &[],
                         "显式读取独显库存可能唤醒独显；继续读取？",
@@ -500,24 +510,13 @@ pub fn sections(page: Page, tools_tab: usize, model: &UiModel) -> Vec<Section> {
                 ],
             },
         ],
+        Page::Graphics => sections(Page::Display, tools_tab, model).into_iter().skip(1).collect(),
         Page::Battery => vec![
             Section {
                 title: tr_static("电池与充电").into(),
-                hint: tr_static("电量、健康度、循环与功率显示在上方。没有传感器的数据保留未知。"),
+                hint: tr_static("查看电池健康、充放电信息与使用时间。"),
                 fields: vec![
                     field("battery.mode", "充电模式", Choice(vec![]), "battery.apply"),
-                    field(
-                        "battery.start_threshold",
-                        "开始充电 · %",
-                        Number,
-                        "battery.threshold",
-                    ),
-                    field(
-                        "battery.stop_threshold",
-                        "停止充电 · %",
-                        Number,
-                        "battery.threshold",
-                    ),
                     field(
                         "battery.night_charge",
                         "夜间充电优化",
@@ -553,12 +552,7 @@ pub fn sections(page: Page, tools_tab: usize, model: &UiModel) -> Vec<Section> {
                     execute(
                         "应用充电设置",
                         "battery.apply",
-                        &[
-                            "battery.mode",
-                            "battery.start_threshold",
-                            "battery.stop_threshold",
-                            "battery.night_charge",
-                        ],
+                        &["battery.mode", "battery.night_charge"],
                     ),
                     execute("读取电池详细状态", "battery.refresh", &[]),
                     execute("读取供电事件计时", "battery.history.refresh", &[]),
@@ -598,97 +592,9 @@ pub fn sections(page: Page, tools_tab: usize, model: &UiModel) -> Vec<Section> {
                     ],
                 )],
             },
+            charge_threshold(model),
         ],
-        Page::Keyboard => vec![
-            Section {
-                title: tr_static("键盘背光").into(),
-                hint: tr_static(
-                    "83NN 保留 Spectrum 固定分区候选；真实协议和键盘类型决定可用效果。未连接接口不会显示为已应用。",
-                ),
-                fields: vec![
-                    field("keyboard.profile", "预设", Choice(vec![]), "keyboard.apply"),
-                    field("keyboard.brightness", "亮度", Number, "keyboard.apply"),
-                    field("keyboard.effect", "灯效", Choice(vec![]), "keyboard.apply"),
-                    field(
-                        "keyboard.zones",
-                        "目标分区（以逗号分隔）",
-                        Text,
-                        "keyboard.apply",
-                    ),
-                    field("keyboard.color", "颜色 · #RRGGBB", Text, "keyboard.apply"),
-                    field("keyboard.speed", "速度", Number, "keyboard.apply"),
-                    field(
-                        "keyboard.direction",
-                        "方向",
-                        Choice(vec![]),
-                        "keyboard.apply",
-                    ),
-                    field("keyboard.preview", "实时预览", Toggle, "keyboard.preview"),
-                ],
-                actions: vec![
-                    execute("检测键盘接口", "keyboard.candidates", &[]),
-                    execute(
-                        "应用背光",
-                        "keyboard.apply",
-                        &[
-                            "keyboard.profile",
-                            "keyboard.brightness",
-                            "keyboard.effect",
-                            "keyboard.zones",
-                            "keyboard.color",
-                            "keyboard.speed",
-                            "keyboard.direction",
-                            "keyboard.preview",
-                        ],
-                    ),
-                    doc("多灯效与分区配置", "spectrum_keyboard"),
-                    doc("旧式 RGB 配置", "rgb_keyboard"),
-                ],
-            },
-            Section {
-                title: tr_static("锁定与指示灯").into(),
-                hint: tr_static("硬件不支持的控件会明确禁用。"),
-                fields: vec![
-                    field("keys.fn_lock", "Fn Lock", Toggle, "keys.apply"),
-                    field("keys.win_lock", "Win 键锁定", Toggle, "keys.apply"),
-                    field("keys.touchpad_lock", "触摸板锁定", Toggle, "keys.apply"),
-                    field("keys.microphone_muted", "麦克风静音", Toggle, "keys.apply"),
-                    field(
-                        "keyboard.white_level",
-                        "白光亮度",
-                        Choice(vec![]),
-                        "keyboard.white",
-                    ),
-                    field("keyboard.logo", "Logo 背光", Toggle, "keyboard.logo"),
-                    field("keyboard.ports", "接口背光", Toggle, "keyboard.ports"),
-                    field(
-                        "keyboard.power_led",
-                        "电源指示灯亮度",
-                        Number,
-                        "keyboard.power_led",
-                    ),
-                ],
-                actions: vec![
-                    execute(
-                        "应用按键与指示灯",
-                        "keys.apply",
-                        &[
-                            "keys.fn_lock",
-                            "keys.win_lock",
-                            "keys.touchpad_lock",
-                            "keys.microphone_muted",
-                            "keyboard.white_level",
-                            "keyboard.logo",
-                            "keyboard.ports",
-                            "keyboard.power_led",
-                        ],
-                    ),
-                    execute("发现按键：开始", "keys.discover.start", &[]),
-                    execute("发现按键：停止", "keys.discover.stop", &[]),
-                    doc("自定义 Fn 快捷键", "special_keys"),
-                ],
-            },
-        ],
+        Page::Keyboard => keyboard_page::sections(model),
         Page::Automation => vec![Section {
             title: tr_static("自动化与快捷操作").into(),
             hint: tr_static("按顺序执行；无效参数、递归引用或不支持的硬件动作必须在执行前拒绝。"),
@@ -724,7 +630,7 @@ pub fn sections(page: Page, tools_tab: usize, model: &UiModel) -> Vec<Section> {
                     EditorKind::Automation,
                     "automation",
                     false,
-                    "automation.save",
+                    "",
                 ),
                 execute("立即运行", "automation.run", &["selection.automation"]),
                 confirmed(
@@ -785,7 +691,7 @@ pub fn sections(page: Page, tools_tab: usize, model: &UiModel) -> Vec<Section> {
         Page::Donate => vec![Section {
             title: tr_static("项目与致谢").into(),
             hint: tr_static(
-                "保留 Lenovo Legion Toolkit 原作者与维护者归属；机控是独立的本机 Rust 重构。赞助链接由后台明确展示并按用户点击打开。",
+                "保留 Lenovo Legion Toolkit 原作者与维护者归属；拯救者工具箱是独立的本机 Rust 重构。赞助链接由后台明确展示并按用户点击打开。",
             ),
             fields: vec![],
             actions: vec![
@@ -1098,7 +1004,7 @@ fn tools(tab: usize, model: &UiModel) -> Vec<Section> {
                 "重置设置",
                 "settings.reset",
                 &[],
-                "重置机控设置？后台必须先保留可恢复备份。",
+                "重置拯救者工具箱设置？后台必须先保留可恢复备份。",
             ),
         ]),
         1 => {}
@@ -1177,11 +1083,35 @@ fn tools(tab: usize, model: &UiModel) -> Vec<Section> {
     }]
 }
 
+const THRESHOLD_FIELDS: &[&str] = &["battery.threshold_enabled", "battery.start_threshold", "battery.stop_threshold"];
+
+fn charge_threshold(model: &UiModel) -> Section {
+    let known = model.value(THRESHOLD_FIELDS[0]).is_boolean()
+        && THRESHOLD_FIELDS[1..].iter().all(|key| model.value(key).is_number());
+    let mut actions = vec![execute("检测充电阈值", "battery.threshold.read", &[])];
+    let fields = if known {
+        actions.insert(0, execute("应用充电阈值", "battery.threshold.apply", THRESHOLD_FIELDS));
+        vec![
+            field(THRESHOLD_FIELDS[0], "启用充电阈值", FieldKind::Toggle, "battery.threshold.apply"),
+            field(THRESHOLD_FIELDS[1], "开始充电 (%)", FieldKind::Number, "battery.threshold.apply"),
+            field(THRESHOLD_FIELDS[2], "停止充电 (%)", FieldKind::Number, "battery.threshold.apply"),
+        ]
+    } else {
+        Vec::new()
+    };
+    Section {
+        title: tr_static("充电阈值").into(),
+        hint: tr_static("分别设置开始和停止充电的电量。"),
+        fields,
+        actions,
+    }
+}
+
 fn dashboard(model: &UiModel) -> Vec<Section> {
     use FieldKind::*;
     let mut power = sections(Page::Performance, 0, model).remove(0);
-    power.title = "电源".into();
-    power.hint = "性能模式、充电与供电。自定义模式设置仍在模式旁的配置入口。";
+    power.title = tr_static("电源").into();
+    power.hint = "";
     power.fields.retain(|f| f.key != "power.fnq_custom");
     let mut battery = sections(Page::Battery, 0, model);
     power.fields.extend(
@@ -1189,17 +1119,17 @@ fn dashboard(model: &UiModel) -> Vec<Section> {
             .fields
             .iter()
             .filter(|field| {
-                [
-                    "battery.mode",
-                    "battery.start_threshold",
-                    "battery.stop_threshold",
-                    "battery.night_charge",
-                ]
+                ["battery.mode", "battery.night_charge"]
                 .contains(&field.key)
             })
             .cloned(),
     );
     power.fields.append(&mut battery[1].fields);
+    let threshold = battery.remove(2);
+    if !threshold.fields.is_empty() {
+        power.fields.extend(threshold.fields);
+        power.actions.extend(threshold.actions);
+    }
     power.fields.push(field(
         "selection.presets",
         "自定义预设",
@@ -1224,12 +1154,7 @@ fn dashboard(model: &UiModel) -> Vec<Section> {
         execute(
             "应用充电设置",
             "battery.apply",
-            &[
-                "battery.mode",
-                "battery.start_threshold",
-                "battery.stop_threshold",
-                "battery.night_charge",
-            ],
+            &["battery.mode", "battery.night_charge"],
         ),
         execute(
             "应用供电设置",
@@ -1241,26 +1166,21 @@ fn dashboard(model: &UiModel) -> Vec<Section> {
             ],
         ),
     ]);
+    power.actions.push(navigate("性能与温控", Page::Performance));
     let mut display = sections(Page::Display, 0, model);
     let screen = display.remove(0);
     let mut graphics = display.remove(0);
-    graphics.title = "显卡".into();
-    graphics.hint = "显卡工作模式、独显状态与占用应用、频率和电压配置。";
-    for mut section in display {
-        graphics.fields.append(&mut section.fields);
-        graphics.actions.append(&mut section.actions);
-    }
-    let other = Section {
+    graphics.title = tr_static("图形").into();
+    graphics.hint = "";
+    graphics.fields.extend(display[0].fields.iter().filter(|f| f.key == "selection.gpu.processes").cloned());
+    graphics.actions.extend(display[0].actions.iter().filter(|a| matches!(&a.kind,
+        ActionKind::Execute { command, .. } if matches!(*command, "gpu.refresh" | "gpu.processes.refresh"))).cloned());
+    graphics.actions.push(navigate("独显管理与高级设置", Page::Graphics));
+    let mut other = Section {
         title: tr_static("其他").into(),
-        hint: tr_static("本机支持的按键、指示灯与设备开关。无此硬件时显示明确原因。"),
+        hint: "",
         fields: vec![
             field("keys.microphone_muted", "麦克风静音", Toggle, "keys.apply"),
-            field(
-                "keyboard.white_level",
-                "键盘白光",
-                Choice(vec![]),
-                "keyboard.white",
-            ),
             field("keyboard.logo", "Logo 背光", Toggle, "keyboard.logo"),
             field("keyboard.ports", "接口背光", Toggle, "keyboard.ports"),
             field(
@@ -1273,24 +1193,16 @@ fn dashboard(model: &UiModel) -> Vec<Section> {
             field("keys.fn_lock", "Fn Lock", Toggle, "keys.apply"),
             field("keys.win_lock", "Win 键锁定", Toggle, "keys.apply"),
         ],
-        actions: vec![
-            execute(
-                "应用设备开关",
-                "keys.apply",
-                &[
-                    "keys.microphone_muted",
-                    "keyboard.white_level",
-                    "keyboard.logo",
-                    "keyboard.ports",
-                    "keyboard.power_led",
-                    "keys.touchpad_lock",
-                    "keys.fn_lock",
-                    "keys.win_lock",
-                ],
-            ),
-            doc("自定义控制台", "dashboard"),
-        ],
+        actions: vec![],
     };
+    if let Some(backlight) = keyboard_page::white_field(model, "键盘白光") {
+        other.fields.insert(1, backlight);
+    }
+    let switch_fields: Vec<_> = other.fields.iter().map(|field| field.key).collect();
+    other.actions = vec![
+        execute("应用设备开关", "keys.apply", &switch_fields),
+        doc("自定义控制台", "dashboard"),
+    ];
     configured_dashboard(vec![power, graphics, screen, other], model)
 }
 fn dashboard_item_fields(item: &str) -> &'static [&'static str] {
@@ -1298,7 +1210,7 @@ fn dashboard_item_fields(item: &str) -> &'static [&'static str] {
         "PowerMode" => &["power.mode", "selection.presets"],
         "BatteryMode" => &["battery.mode"],
         "BatteryNightChargeMode" => &["battery.night_charge"],
-        "ChargeThreshold" => &["battery.start_threshold", "battery.stop_threshold"],
+        "ChargeThreshold" => THRESHOLD_FIELDS,
         "AlwaysOnUsb" => &["power.always_on_usb"],
         "InstantBoot" => &["power.instant_boot"],
         "FlipToStart" => &["power.flip_to_start"],
@@ -1414,6 +1326,8 @@ fn configured_dashboard(original: Vec<Section>, model: &UiModel) -> Vec<Section>
                     "excluded_refresh_rates" => items.contains(&"RefreshRate"),
                     _ => false,
                 },
+                ActionKind::Navigate(Page::Performance) => items.contains(&"PowerMode"),
+                ActionKind::Navigate(Page::Graphics) => ["DiscreteGpu", "OverclockDiscreteGpu"].iter().any(|key| items.contains(key)),
                 ActionKind::Cancel(keys) => {
                     keys.iter().any(|key| fields.iter().any(|f| f.key == *key))
                 }
@@ -1436,9 +1350,10 @@ fn configured_dashboard(original: Vec<Section>, model: &UiModel) -> Vec<Section>
                 .unwrap_or_else(|| tr_static("自定义分组")),
         }
         .to_owned();
+        if fields.is_empty() && actions.is_empty() { continue; }
         output.push(Section {
             title,
-            hint: tr_static("按已保存的控制台分组显示。"),
+            hint: "",
             fields,
             actions,
         });
@@ -1561,7 +1476,7 @@ pub const AUTOMATION_ACTIONS: &[(&str, &str)] = &[
     ("battery", "充电模式"),
     ("battery_night", "夜间充电"),
     ("always_on_usb", "USB 供电"),
-    ("deactivate_gpu", "独显休眠"),
+    ("deactivate_gpu", "独显自动化"),
     ("delay", "等待"),
     ("display_brightness", "屏幕亮度"),
     ("dpi", "显示缩放"),
@@ -1598,8 +1513,8 @@ pub const AUTOMATION_ACTIONS: &[(&str, &str)] = &[
     ("airplane", "飞行模式"),
     ("white_keyboard", "白光背光"),
     ("win_key", "Win 键锁定"),
-    ("close_app", "关闭机控"),
-    ("show_app", "显示机控"),
+    ("close_app", "关闭拯救者工具箱"),
+    ("show_app", "显示拯救者工具箱"),
     ("osd", "OSD"),
     ("osd_lock", "锁定 OSD"),
     ("fan_max", "风扇全速"),
@@ -1683,6 +1598,24 @@ mod translation_tests {
 #[cfg(test)]
 mod readonly_field_tests {
     use super::*;
+    #[test]
+    fn charge_threshold_fields_only_follow_verified_state_and_have_their_own_action() {
+        let mut model = UiModel::default();
+        let unknown = charge_threshold(&model);
+        assert!(unknown.fields.is_empty());
+        assert!(matches!(unknown.actions[0].kind, ActionKind::Execute { command: "battery.threshold.read", .. }));
+        model.set_value("battery.threshold_enabled", json!(false));
+        model.set_value("battery.start_threshold", json!(45));
+        model.set_value("battery.stop_threshold", json!(80));
+        let known = charge_threshold(&model);
+        assert_eq!(known.fields.iter().map(|field| field.key).collect::<Vec<_>>(), THRESHOLD_FIELDS);
+        assert!(matches!(&known.actions[0].kind, ActionKind::Execute { command: "battery.threshold.apply", fields, .. } if fields == THRESHOLD_FIELDS));
+        for action in sections(Page::Battery, 0, &model).into_iter().flat_map(|section| section.actions) {
+            if let ActionKind::Execute { command: "battery.apply", fields, .. } = action.kind {
+                assert!(!fields.iter().any(|field| THRESHOLD_FIELDS.contains(field)));
+            }
+        }
+    }
     #[test]
     fn readonly_status_keys_never_enter_preferences_save_payload() {
         let model = UiModel::default();

@@ -9,7 +9,7 @@ $metadataText = & (Join-Path $PSScriptRoot 'cargo.ps1') metadata --locked --form
 if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the locked dependency graph.' }
 $metadata = ($metadataText -join [Environment]::NewLine) | ConvertFrom-Json
 $lines = [Collections.Generic.List[string]]::new()
-$lines.Add('Jiks locked Cargo dependency licenses')
+$lines.Add('拯救者工具箱 locked Cargo dependency licenses')
 $lines.Add('Cargo.lock SHA-256: ' + (Get-FileHash -LiteralPath (Join-Path $sourceRoot 'Cargo.lock') -Algorithm SHA256).Hash.ToLowerInvariant())
 $lines.Add('Target: ' + $Target)
 $lines.Add('Generated from the exact downloaded crate sources; local cache paths are omitted.')

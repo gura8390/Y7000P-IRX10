@@ -163,6 +163,12 @@ fn apply(cache: &mut BTreeMap<String, Value>, action: &A, result: &Value) -> Res
             );
             put(cache, "energy", result.clone());
         }
+        A::ChargeThreshold(target) => {
+            let observed: jiks_platform::charge_threshold::Threshold =
+                serde_json::from_value(result.get("state").context("充电阈值读回缺失")?.clone())?;
+            ensure!(observed.validate()? == *target, "充电阈值读回与请求不一致");
+            put(cache, "battery.threshold", result.clone());
+        }
         A::EnableCpu { .. } | A::SetCpuPower { .. } => cpu(cache, result)?,
         A::StopCpu => {
             if !result.is_null() {
@@ -471,21 +477,24 @@ fn apply(cache: &mut BTreeMap<String, Value>, action: &A, result: &Value) -> Res
                 ensure!(value <= 9, "Spectrum brightness out of range");
                 put(cache, "keyboard.brightness", json!(value));
             }
-            _ => {
+            operation => {
+                let profile = match operation {
+                    SpectrumAction::ReadEffects { profile, .. }
+                    | SpectrumAction::Reset { profile, .. }
+                    | SpectrumAction::SelectProfile { profile, .. } => *profile,
+                    SpectrumAction::Effects { profile, .. } => profile.profile,
+                    _ => unreachable!("profile and brightness reads are handled above"),
+                };
                 ensure!(
-                    result
-                        .get("profile")
-                        .and_then(Value::as_u64)
-                        .is_some_and(|v| v <= 6)
+                    profile <= 6
+                        && result.get("profile").and_then(Value::as_u64) == Some(u64::from(profile))
                         && result.get("effects").is_some_and(Value::is_array),
-                    "Spectrum completion lacks verified profile"
+                    "Spectrum completion did not verify the requested profile"
                 );
                 put(cache, "keyboard.effects", result.clone());
-                put(
-                    cache,
-                    "keyboard.active_profile",
-                    json!({"profile":result["profile"]}),
-                );
+                if matches!(operation, SpectrumAction::SelectProfile { .. }) {
+                    put(cache, "keyboard.active_profile", json!({"profile":profile}));
+                }
             }
         },
         A::SetGpuOverclock { .. } => {
@@ -654,6 +663,30 @@ fn apply(cache: &mut BTreeMap<String, Value>, action: &A, result: &Value) -> Res
                 });
             }
         }
+        A::KillGpuApps { .. } => {
+            let exited: Vec<jiks_platform::gpu_management::ProcessIdentity> = serde_json::from_value(
+                result.get("completed_identities").context("自动化结束应用缺少已退出进程身份")?.clone(),
+            )?;
+            ensure!(
+                result.get("completed_pids") == Some(&json!(exited.iter().map(|p| p.pid).collect::<Vec<_>>()))
+                    && result.get("skipped").and_then(Value::as_object).is_some()
+                    && result.get("failed").and_then(Value::as_object).is_some()
+                    && result.get("stopped").is_some_and(|v| v.is_null() || v.is_string()),
+                "自动化结束独显应用缺少实际回执"
+            );
+            if let Some(rows) = cache.get_mut("gpu.processes")
+                .and_then(|v| v.get_mut("processes")).and_then(Value::as_array_mut)
+            {
+                rows.retain(|row| {
+                    !exited.iter().any(|process| {
+                        row.pointer("/identity/pid").and_then(Value::as_u64) == Some(u64::from(process.pid))
+                            && row.pointer("/identity/creation_filetime").and_then(Value::as_u64) == Some(process.creation_filetime)
+                            && row.pointer("/identity/executable").and_then(Value::as_str)
+                                .is_some_and(|path| path.eq_ignore_ascii_case(&process.executable))
+                    })
+                });
+            }
+        }
         A::SetGpuPreference { .. } => {
             let identity = result
                 .get("identity")
@@ -688,6 +721,26 @@ fn apply(cache: &mut BTreeMap<String, Value>, action: &A, result: &Value) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn spectrum_effect_readback_does_not_relabel_the_active_profile() {
+        let mut cache = BTreeMap::new();
+        let select = A::Spectrum(SpectrumAction::SelectProfile {
+            path: "fixture".into(),
+            profile: 2,
+        });
+        let read = A::Spectrum(SpectrumAction::ReadEffects {
+            path: "fixture".into(),
+            profile: 4,
+        });
+        absorb(&mut cache, &select, &json!({"profile":2,"effects":[]})).unwrap();
+        absorb(&mut cache, &read, &json!({"profile":4,"effects":[]})).unwrap();
+        assert_eq!(cache["keyboard.active_profile"]["profile"], 2);
+        assert_eq!(cache["keyboard.effects"]["profile"], 4);
+
+        let before = cache.clone();
+        assert!(absorb(&mut cache, &read, &json!({"profile":3,"effects":[]})).is_err());
+        assert_eq!(cache, before);
+    }
     #[test]
     fn mode_completion_updates_all_mode_consumers_and_invalidates_old_limits() {
         let mut c = BTreeMap::from([

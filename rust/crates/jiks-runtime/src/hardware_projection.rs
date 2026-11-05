@@ -143,7 +143,7 @@ pub fn project(
         "display.acm",
         "display.overdrive",
         "battery.apply",
-        "battery.threshold",
+        "battery.threshold.apply",
         "battery.night_charge",
         "power.accessories.apply",
         "keys.apply",
@@ -158,7 +158,6 @@ pub fn project(
         "keyboard.effects.reset",
         "gpu.hybrid.apply",
         "gpu.oc.apply",
-        "gpu.settings.save",
         "gpu.sleep",
         "gpu.restart",
         "gpu.process.preference",
@@ -485,6 +484,37 @@ pub fn project(
             ai.raw_mode == 2,
             "仅均衡模式可修改AI子模式，启用还需接通AC",
         );
+    }
+
+    b.read_cap("battery.threshold.read", true, "");
+    for key in [
+        "battery.threshold_enabled",
+        "battery.start_threshold",
+        "battery.stop_threshold",
+    ] {
+        b.scalar(key, Value::Null);
+    }
+    if let Some(error) = cache.get("error.battery.threshold").and_then(Value::as_str) {
+        b.cap("battery.threshold.apply", false, error);
+    } else if let Some(threshold) = cache.get("battery.threshold") {
+        let state = threshold.get("state").and_then(|state| {
+            serde_json::from_value::<jiks_platform::charge_threshold::Threshold>(state.clone())
+                .ok()?
+                .validate()
+                .ok()
+        });
+        if let Some(state) = state {
+            b.scalar("battery.threshold_enabled", json!(state.enabled));
+            b.scalar("battery.start_threshold", json!(state.start));
+            b.scalar("battery.stop_threshold", json!(state.stop));
+            let min = jiks_platform::charge_threshold::MINIMUM as i32;
+            let max = jiks_platform::charge_threshold::MAXIMUM as i32;
+            b.range("battery.start_threshold", min, max, 1, "%");
+            b.range("battery.stop_threshold", min, max, 1, "%");
+            b.cap("battery.threshold.apply", true, "");
+        } else if let Some(reason) = threshold.get("reason").and_then(Value::as_str) {
+            b.cap("battery.threshold.apply", false, reason);
+        }
     }
 
     if let Some(energy) = cache.get("energy") {
@@ -951,8 +981,9 @@ pub fn project(
         .get("keyboard.effects")
         .and_then(|v| v.get("profile"))
         .and_then(Value::as_u64)
+        .filter(|profile| (1..=6).contains(profile))
     {
-        b.scalar("keyboard.profile", json!(profile));
+        b.scalar("keyboard.effects_profile", json!(profile));
     }
     if let Some(effects) = cache
         .get("keyboard.effects")
@@ -1480,6 +1511,8 @@ fn project_discovery_errors(b: &mut Builder<'_>, cache: &BTreeMap<String, Value>
             &["power_modes", "cpu", "system"]
         } else if key.starts_with("display.") {
             &["display_controls", "system", "mapped.overdrive"]
+        } else if key.starts_with("battery.threshold.") {
+            &["battery.threshold"]
         } else if key.starts_with("battery.") {
             &["energy", "devices"]
         } else if key.starts_with("keys.") {
@@ -2634,13 +2667,16 @@ mod tests {
         assert!(!p.capabilities["keyboard.apply"].available);
         assert!(p.metrics.is_empty());
         // Explicit nulls invalidate prior readonly status in the merged UI
-        // cache; no unknown observation becomes a default P0/Inactive value.
+        // cache; no unknown observation becomes a default hardware value.
         assert!(p.values.iter().all(|(key, value)| {
             [
                 "gpu.current_pstate",
                 "gpu.current_pstate_at_tick_ms",
                 "gpu.state",
                 "gpu.state_at_tick_ms",
+                "battery.threshold_enabled",
+                "battery.start_threshold",
+                "battery.stop_threshold",
             ]
             .contains(&key.as_str())
                 && value.is_null()
@@ -2720,6 +2756,21 @@ mod tests {
             p.collections["keyboard.interfaces"][0].value["protocol_probed"],
             false
         );
+    }
+    #[test]
+    fn reading_lighting_effects_does_not_change_the_active_profile() {
+        let mut cache = BTreeMap::from([(
+            "keyboard.effects".into(),
+            json!({"profile":4,"effects":[]}),
+        )]);
+        let state = project(&cache, false, None);
+        assert_eq!(state.values["keyboard.effects_profile"], 4);
+        assert!(!state.values.contains_key("keyboard.profile"));
+
+        cache.insert("keyboard.active_profile".into(), json!({"profile":2}));
+        let state = project(&cache, false, None);
+        assert_eq!(state.values["keyboard.effects_profile"], 4);
+        assert_eq!(state.values["keyboard.profile"], 2);
     }
     #[test]
     fn failed_capture_is_not_a_capability_and_gpu_presence_is_not_oc_support() {

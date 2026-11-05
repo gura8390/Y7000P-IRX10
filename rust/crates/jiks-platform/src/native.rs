@@ -669,8 +669,14 @@ pub enum HardwareAction {
     },
     RestartGpu {
         instance_id: String,
+        require_started: bool,
     },
     KillGpuProcesses(Vec<crate::gpu_management::ProcessIdentity>),
+    KillGpuApps {
+        index: u32,
+        expected_name: String,
+        instance_id: String,
+    },
     SetGpuPreference {
         process: crate::gpu_management::ProcessIdentity,
         preference: crate::gpu_management::GpuPreference,
@@ -733,6 +739,8 @@ pub enum HardwareAction {
     },
     Energy(crate::energy::EnergyAction),
     ReadEnergy,
+    ChargeThreshold(crate::charge_threshold::Threshold),
+    ReadChargeThreshold,
     ReadTelemetry,
     ReadIntelSensors,
 }
@@ -1217,6 +1225,9 @@ impl NativeState {
         if matches!(action, HardwareAction::ReadEnergy) {
             return Ok(serde_json::to_value(crate::energy::read_status()?)?);
         }
+        if matches!(action, HardwareAction::ReadChargeThreshold) {
+            return Ok(serde_json::to_value(crate::charge_threshold::read()?)?);
+        }
         if matches!(
             action,
             HardwareAction::ReadCpu | HardwareAction::ReadCpuTemperature
@@ -1367,16 +1378,41 @@ impl NativeState {
                 }
                 result
             }
-            HardwareAction::RestartGpu { instance_id } => {
+            HardwareAction::RestartGpu { instance_id, require_started } => {
                 ensure!(
                     self.cpu.is_none(),
                     "Stop and verify CPU restoration before restarting GPU"
                 );
                 self.gpu_sampler = Default::default();
-                crate::gpu_management::restart(&owner, &permit, &instance_id)
+                crate::gpu_management::restart(&owner, &permit, &instance_id, require_started)
             }
             HardwareAction::KillGpuProcesses(processes) => {
                 crate::gpu_management::kill(&owner, &permit, &processes)
+            }
+            HardwareAction::KillGpuApps { index, expected_name, instance_id } => {
+                permit.check_write_boundary()?;
+                let devices = crate::gpu_management::devices()?;
+                ensure!(
+                    index == 0 && devices.len() == 1 && devices[0].started
+                        && devices[0].problem_code == 0
+                        && devices[0].instance_id.eq_ignore_ascii_case(&instance_id)
+                        && devices[0].description.eq_ignore_ascii_case(&expected_name),
+                    "本机独显 PnP 身份或启动状态已变化"
+                );
+                let hybrid = crate::hybrid::read(&self.facade).selected()
+                    .context("无法核对独显混合模式，未结束应用")?;
+                if hybrid == crate::hybrid::HybridMode::Off {
+                    return Ok(serde_json::to_value(crate::gpu_management::AutomationKillReport::default())?);
+                }
+                let mut gpu = crate::nvapi_native::NativeNvApi::open(index, &expected_name, None, None, None)?;
+                let report = crate::gpu_management::kill_automation_apps(&owner, &permit, || {
+                    match crate::gpu_status::coproc(&mut gpu)? {
+                        0 | 2 => Ok(vec![]),
+                        1 => crate::gpu_status::active_application_pids(&mut gpu),
+                        raw => bail!("未识别的独显协处理器状态 {raw}，未结束应用"),
+                    }
+                })?;
+                Ok(serde_json::to_value(report)?)
             }
             HardwareAction::SetGpuPreference {
                 process,
@@ -1851,6 +1887,9 @@ impl NativeState {
             HardwareAction::Energy(action) => Ok(serde_json::to_value(crate::energy::write(
                 &owner, &permit, &action,
             )?)?),
+            HardwareAction::ChargeThreshold(target) => Ok(serde_json::to_value(
+                crate::charge_threshold::write(&owner, &permit, target)?,
+            )?),
             _ => unreachable!(),
         }
     }

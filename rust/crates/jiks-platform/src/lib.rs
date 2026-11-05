@@ -7,6 +7,7 @@ pub mod battery;
 pub mod battery_history;
 pub mod boot_logo;
 pub mod brightness_sync;
+pub mod charge_threshold;
 mod cpu;
 pub mod device_information;
 pub mod devices;

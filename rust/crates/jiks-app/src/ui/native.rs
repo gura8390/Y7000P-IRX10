@@ -2,6 +2,8 @@ use super::{
     a11y,
     catalog::{self, Action, ActionKind, FieldKind, Page},
     editors,
+    layout::{CONTENT_RIGHT, CONTENT_X, CONTROL_HEIGHT, FOOTER_HEIGHT, GROUP_GAP, RowColumns, VIEW_TOP},
+    scrolling::{SCROLL_TIMER, ScrollChild, ScrollMessages, Scrolling, Viewport, install_wheel_routing},
 };
 use crate::ui_model::*;
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -11,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -23,11 +25,23 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
+use windows_sys::Win32::Graphics::Dwm::{
+    DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute,
+};
 
 // Stable Windows SDK constants omitted/gated in windows-sys metadata.
 pub(super) const SS_LEFT: u32 = 0;
+const SS_CENTER: u32 = 1;
+const SS_RIGHT: u32 = 2;
+const SS_ICON: u32 = 3;
+const STM_SETICON: u32 = 0x0170;
+const SS_NOPREFIX: u32 = 0x0080;
+const SS_CENTERIMAGE: u32 = 0x0200;
+const SS_ENDELLIPSIS: u32 = 0x4000;
 pub(super) const TRACKBAR_GET_POSITION: u32 = WM_USER;
 const TRAY_KEY_SELECT: u32 = NIN_SELECT | 1;
+const APP_ICON: u16 = 101;
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Palette {
     paper: u32,
@@ -45,9 +59,9 @@ impl Default for Palette {
             surface: 0x00ffffff,
             ink: 0x00202020,
             accent: 0x00ff9c6b,
-            muted: 0x00666666,
-            line: 0x00e2e2e2,
-            pressed: 0x00e7e7e7,
+            muted: 0x00615b53,
+            line: 0x00dad6cf,
+            pressed: 0x00f5e8da,
         }
     }
 }
@@ -84,6 +98,9 @@ pub(super) fn paper() -> u32 {
 pub(super) fn surface() -> u32 {
     PALETTE.with(|p| p.get().surface)
 }
+fn pane() -> u32 {
+    if paper() & 0xff < 128 { 0x00262626 } else { 0x00fbf9f8 }
+}
 pub(super) fn ink() -> u32 {
     PALETTE.with(|p| p.get().ink)
 }
@@ -96,13 +113,13 @@ pub(super) fn muted() -> u32 {
 pub(super) fn line() -> u32 {
     PALETTE.with(|p| p.get().line)
 }
-fn apply_palette(model: &UiModel) -> bool {
-    let theme = model
+fn apply_palette(model: &UiModel, preview_theme: Option<&str>) -> bool {
+    let theme = preview_theme.unwrap_or_else(|| model
         .values
         .get("appearance.effective_theme")
         .or_else(|| model.values.get("appearance.theme"))
         .and_then(Value::as_str)
-        .unwrap_or("light");
+        .unwrap_or("light"));
     let mut next = if theme.eq_ignore_ascii_case("dark") {
         Palette {
             paper: 0x00202020,
@@ -134,7 +151,26 @@ fn apply_palette(model: &UiModel) -> bool {
         changed
     })
 }
+
+pub(super) unsafe fn app_icon() -> HICON {
+    unsafe { LoadIconW(GetModuleHandleW(null()), APP_ICON as usize as *const u16) }
+}
+
+pub(super) unsafe fn apply_window_chrome(hwnd: HWND) {
+    unsafe {
+        let dark = u32::from(paper() & 0xff < 128);
+        for (attribute, value) in [
+            (DWMWA_USE_IMMERSIVE_DARK_MODE, dark),
+            (DWMWA_CAPTION_COLOR, paper()),
+            (DWMWA_TEXT_COLOR, ink()),
+            (DWMWA_BORDER_COLOR, line()),
+        ] {
+            let _ = DwmSetWindowAttribute(hwnd, attribute as u32, (&value as *const u32).cast(), 4);
+        }
+    }
+}
 const WM_TRAY: u32 = WM_APP + 31;
+const WM_RELAYOUT: u32 = WM_APP + 32;
 const TIMER: usize = 1;
 const ID_NAV: u16 = 100;
 const ID_EXIT: u16 = 120;
@@ -169,10 +205,98 @@ fn action_key(action: &Action) -> String {
             if *fresh { "new" } else { "selected" }
         ),
         ActionKind::Document(document) => format!("document.{document}"),
+        ActionKind::Navigate(page) => format!("navigate.{}", page.key()),
         ActionKind::SensorSettings => "sensor-settings".into(),
         ActionKind::Cancel(fields) => format!("cancel.{}", fields.join(",")),
     };
     format!("{}.{}", action.accessibility_role, command)
+}
+
+fn metric_caption(metric: &UiMetric, compact: bool) -> &str {
+    if !compact { return &metric.label; }
+    let caption = metric.label.trim_start_matches("CPU ").trim_start_matches("GPU ");
+    caption.split_once('（').map_or(caption, |(head, _)| head.trim())
+}
+
+fn field_available(model: &UiModel, key: &str, capability: &str) -> bool {
+    model.capabilities.get(key).map(|cap| cap.available)
+        .unwrap_or_else(|| capability.is_empty() || model.can(capability))
+}
+
+fn field_options(model: &UiModel, field: &catalog::Field) -> Option<Vec<UiChoice>> {
+    match &field.kind {
+        FieldKind::Choice(fallback) => {
+            let mut options = model.options.get(field.key).unwrap_or(fallback).clone();
+            if field.key == "packages.sort" {
+                for option in &mut options {
+                    option.label = super::i18n::tr(&option.label).into_owned();
+                }
+            }
+            Some(options)
+        }
+        FieldKind::Collection(key) => Some(model.collections.get(*key).into_iter().flatten().map(|item| {
+            let name = if item.detail.is_empty() { item.label.clone() } else { format!("{} · {}", item.label, item.detail) };
+            UiChoice::new(name, item.id.clone())
+        }).collect()),
+        _ => None,
+    }
+}
+
+fn choice_matches(option: &UiChoice, value: &Value) -> bool {
+    option.value == *value || (!option.value.is_null() && !value.is_null() && scalar(&option.value) == scalar(value))
+}
+
+fn selected_choice(options: &[UiChoice], value: &Value) -> usize {
+    options.iter().position(|option| choice_matches(option, value))
+        .or_else(|| options.iter().position(|option| option.value.is_null()))
+        .unwrap_or(usize::MAX)
+}
+
+fn field_display(options: &[UiChoice], value: &Value, empty: &str) -> String {
+    if value.is_null() || value.as_str().is_some_and(|value| value.trim().is_empty()) {
+        return empty.to_owned();
+    }
+    if let Some(option) = options.iter().find(|option| choice_matches(option, value)) {
+        return option.label.clone();
+    }
+    match value.as_bool() {
+        Some(true) => super::i18n::tr("开启").into_owned(),
+        Some(false) => super::i18n::tr("关闭").into_owned(),
+        None => scalar(value),
+    }
+}
+
+fn backend_state(model: &UiModel) -> u8 {
+    if !model.value("backend.connection_failed").is_null() || !model.value("backend.terminal_error").is_null() { 2 }
+    else if model.value("backend.ready").as_bool() == Some(true) { 1 }
+    else { 0 }
+}
+
+fn field_empty_text(model: &UiModel, field: &catalog::Field) -> String {
+    let state = backend_state(model);
+    let caption = match &field.kind {
+        FieldKind::Collection(key) if *key == "gpu.processes" => {
+            if model.collections.contains_key(*key) { "无占用应用" } else { "尚未读取" }
+        }
+        FieldKind::Collection(_) => "暂无项目",
+        _ if state == 2 => "连接中断",
+        _ if state == 0 => "正在读取…",
+        _ if !field_available(model, field.key, field.capability) => "不可用",
+        _ => "暂无数据",
+    };
+    super::i18n::tr(caption).into_owned()
+}
+
+fn status_caption(model: &UiModel) -> &str {
+    if model.value("backend.read_only").as_bool() == Some(true) && backend_state(model) == 1 {
+        super::i18n::tr_static("只读预览 · 可查看设备状态")
+    } else {
+        &model.notice
+    }
+}
+
+fn toolbar_available(model: &UiModel, id: u16, command: &str) -> bool {
+    (id == ID_THEME && model.value("backend.read_only").as_bool() == Some(true)) || model.can(command)
 }
 static REQUEST: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, PartialEq, Eq)]
@@ -562,7 +686,7 @@ pub(super) fn wide(text: &str) -> Vec<u16> {
 pub(super) fn snapshot(bridge: &UiBridge) -> UiModel {
     bridge.model.lock().map(|m| m.clone()).unwrap_or_else(|_| {
         let mut model = UiModel::default();
-        model.notice = "后台状态暂不可读，请重新打开机控。".into();
+        model.notice = "后台状态暂不可读，请重新打开拯救者工具箱。".into();
         model
     })
 }
@@ -619,7 +743,7 @@ pub(super) unsafe fn confirm(hwnd: HWND, body: &str) -> bool {
         MessageBoxW(
             hwnd,
             wide(&super::i18n::tr(body)).as_ptr(),
-            wide(&super::i18n::tr("机控 · 确认操作")).as_ptr(),
+            wide(&super::i18n::tr("拯救者工具箱 · 确认操作")).as_ptr(),
             MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
         ) == IDYES
     }
@@ -633,12 +757,24 @@ pub(super) unsafe fn create(
     rect: [i32; 4],
     font: HFONT,
 ) -> HWND {
+    unsafe { create_control(parent, class, label, style | WS_VISIBLE, id, rect, font) }
+}
+
+unsafe fn create_control(
+    parent: HWND,
+    class: &str,
+    label: &str,
+    style: u32,
+    id: u16,
+    rect: [i32; 4],
+    font: HFONT,
+) -> HWND {
     unsafe {
         let hwnd = CreateWindowExW(
             0,
             wide(class).as_ptr(),
             wide(label).as_ptr(),
-            WS_CHILD | WS_VISIBLE | style,
+            WS_CHILD | style,
             rect[0],
             rect[1],
             rect[2],
@@ -805,7 +941,7 @@ unsafe extern "system" fn presentation_cleanup(
             if !GetPropW(hwnd, wide("Jiks.Text").as_ptr()).is_null() {
                 let surface_label = !GetPropW(hwnd, wide("Jiks.Surface").as_ptr()).is_null();
                 let muted_label = !GetPropW(hwnd, wide("Jiks.Muted").as_ptr()).is_null();
-                let color = if surface_label { surface() } else { paper() };
+                let color = label_background(hwnd, surface_label);
                 let transparent = !surface_label
                     && !GetPropW(GetParent(hwnd), wide("Jiks.Background").as_ptr()).is_null();
                 let mut rect: RECT = zeroed();
@@ -846,6 +982,7 @@ unsafe extern "system" fn presentation_cleanup(
                 "Jiks.ActionCard",
                 "Jiks.Background",
                 "Jiks.Text",
+                "Jiks.Pane",
             ] {
                 RemovePropW(hwnd, wide(property).as_ptr());
             }
@@ -854,6 +991,18 @@ unsafe extern "system" fn presentation_cleanup(
         DefSubclassProc(hwnd, msg, wp, lp)
     }
 }
+unsafe fn label_background(hwnd: HWND, on_surface: bool) -> u32 {
+    unsafe {
+        if on_surface {
+            surface()
+        } else if !GetPropW(hwnd, wide("Jiks.Pane").as_ptr()).is_null() {
+            pane()
+        } else {
+            paper()
+        }
+    }
+}
+
 /// Paint-only messages can arrive synchronously while a layout method owns
 /// RefMut<App/Editor>. HWND presentation flags avoid reborrowing application
 /// state or silently falling back to system-grey controls in that path.
@@ -867,7 +1016,7 @@ pub(super) unsafe fn presentation_message(msg: u32, wp: usize, lp: isize) -> Opt
                 let muted_text = !GetPropW(hwnd, wide("Jiks.Muted").as_ptr()).is_null();
                 SetTextColor(dc, if muted_text { muted() } else { ink() });
                 SetBkMode(dc, TRANSPARENT as i32);
-                let color = if on_surface { surface() } else { paper() };
+                let color = label_background(hwnd, on_surface);
                 SetBkColor(dc, color);
                 SetDCBrushColor(dc, color);
                 Some(
@@ -895,33 +1044,6 @@ pub(super) unsafe fn presentation_message(msg: u32, wp: usize, lp: isize) -> Opt
             }
             _ => None,
         }
-    }
-}
-/// Clip a scrolled control to its viewport rather than hiding its entire
-/// contents when only the first/last line crosses a viewport edge.
-pub(super) unsafe fn clip_to_viewport(
-    hwnd: HWND,
-    y: i32,
-    width: i32,
-    height: i32,
-    top: i32,
-    bottom: i32,
-    dpi: u32,
-) -> bool {
-    unsafe {
-        let visible_top = (top - y).max(0).min(height);
-        let visible_bottom = (bottom - y).max(0).min(height);
-        let scale = |n: i32| n * dpi as i32 / 96;
-        let region = CreateRectRgn(
-            0,
-            scale(visible_top),
-            scale(width.max(0)),
-            scale(visible_bottom),
-        );
-        if SetWindowRgn(hwnd, region, 1) == 0 {
-            DeleteObject(region);
-        }
-        visible_bottom > visible_top
     }
 }
 unsafe extern "system" fn button_hover(
@@ -1111,7 +1233,11 @@ pub(super) unsafe fn paint_button(item: &DRAWITEMSTRUCT, selected: bool) {
         SelectObject(item.hDC, old_brush);
         DeleteObject(pen);
         SetBkMode(item.hDC, TRANSPARENT as i32);
-        SetTextColor(item.hDC, if disabled { 0x00909090 } else { ink() });
+        SetTextColor(item.hDC, if disabled { muted() } else { ink() });
+        let button_font = SendMessageW(item.hwndItem, WM_GETFONT, 0, 0) as HFONT;
+        if !button_font.is_null() {
+            SelectObject(item.hDC, button_font);
+        }
         let label = wide(&get_text(item.hwndItem));
         let mut rect = item.rcItem;
         let main_navigation =
@@ -1134,7 +1260,7 @@ pub(super) unsafe fn paint_button(item: &DRAWITEMSTRUCT, selected: bool) {
             }
             if main_navigation {
                 paint_nav_icon(item, item.CtlID - ID_NAV as u32);
-                rect.top += 29 * dpi as i32 / 96;
+                rect.top += 25 * dpi as i32 / 96;
             } else {
                 // Categories retain the old settings sidebar's icon + title.
                 paint_nav_icon(
@@ -1182,7 +1308,7 @@ pub(super) unsafe fn paint_primary_button(item: &DRAWITEMSTRUCT) {
         let saved_dc = SaveDC(item.hDC);
         let disabled = item.itemState & ODS_DISABLED != 0;
         let background = if disabled { line() } else { accent() };
-        fill(item.hDC, &item.rcItem, paper());
+        fill(item.hDC, &item.rcItem, label_background(item.hwndItem, false));
         let brush = CreateSolidBrush(background);
         let pen = CreatePen(PS_SOLID, 1, background);
         let old_brush = SelectObject(item.hDC, brush);
@@ -1202,28 +1328,21 @@ pub(super) unsafe fn paint_primary_button(item: &DRAWITEMSTRUCT) {
         DeleteObject(brush);
         DeleteObject(pen);
         SetBkMode(item.hDC, TRANSPARENT as i32);
-        // Theme/accent can be customized. Choose readable ink rather than
-        // assuming that every user-selected accent is dark.
-        let luminance = (background & 255) * 299
-            + ((background >> 8) & 255) * 587
-            + ((background >> 16) & 255) * 114;
-        SetTextColor(
-            item.hDC,
-            if disabled {
-                muted()
-            } else if luminance > 150000 {
-                0x00202020
-            } else {
-                0x00ffffff
-            },
-        );
+        let channel = |shift| {
+            let srgb = ((background >> shift) & 255u32) as f32 / 255.0;
+            if srgb <= 0.04045 { srgb / 12.92 } else { ((srgb + 0.055) / 1.055).powf(2.4) }
+        };
+        let luminance = 0.2126 * channel(0) + 0.7152 * channel(8) + 0.0722 * channel(16);
+        SetTextColor(item.hDC, if luminance >= 0.179_129 { 0 } else { 0x00ffffff });
+        let font = SendMessageW(item.hwndItem, WM_GETFONT, 0, 0) as HFONT;
+        if !font.is_null() { SelectObject(item.hDC, font); }
         let mut rect = item.rcItem;
         DrawTextW(
             item.hDC,
             wide(&get_text(item.hwndItem)).as_ptr(),
             -1,
             &mut rect,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
         );
         if item.itemState & ODS_FOCUS != 0 {
             InflateRect(&mut rect, -4, -4);
@@ -1379,18 +1498,17 @@ enum BindingKind {
     Text,
     Number,
     Choice(Vec<UiChoice>),
+    List(Vec<UiChoice>),
+    Display {
+        options: Vec<UiChoice>,
+        empty: String,
+    },
 }
 struct Binding {
     key: String,
     hwnd: HWND,
     kind: BindingKind,
     capability: String,
-}
-struct Placed {
-    hwnd: HWND,
-    rect: [i32; 4],
-    clip_height: i32,
-    pinned: bool,
 }
 #[derive(Clone, Copy)]
 struct CardSurface {
@@ -1402,6 +1520,7 @@ struct MetricPlacement {
     value: HWND,
     detail: HWND,
     key: String,
+    compact: bool,
 }
 enum DeferredEditor {
     DeviceInformation,
@@ -1504,7 +1623,7 @@ struct App {
     brush: HBRUSH,
     surface_brush: HBRUSH,
     fixed: Vec<HWND>,
-    content: Vec<Placed>,
+    content: Vec<ScrollChild>,
     bindings: Vec<Binding>,
     buttons: BTreeMap<u16, Action>,
     pickers: BTreeMap<u16, (String, super::selectors::PickerKind)>,
@@ -1519,10 +1638,15 @@ struct App {
     notice: HWND,
     rendered_revision: u64,
     metadata_revision: u64,
+    backend_state: u8,
     scroll: i32,
+    scrolling: Scrolling,
     content_height: i32,
     pending: BTreeMap<u64, bool>,
     rendering: bool,
+    layout_posted: bool,
+    preview_theme: Option<&'static str>,
+    feedback_until: Option<Instant>,
     tray: bool,
     tray_data: NOTIFYICONDATAW,
     taskbar_message: u32,
@@ -1546,6 +1670,8 @@ struct App {
 
 pub(super) fn run(bridge: UiBridge) -> Result<()> {
     let _accessibility = a11y::UiThread::enter()?;
+    #[cfg(debug_assertions)]
+    let _trace = super::scroll_trace::Session::start();
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let common = INITCOMMONCONTROLSEX {
@@ -1566,7 +1692,7 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
                     &mut font_count,
                 )
             });
-        apply_palette(&live_snapshot(&bridge));
+        apply_palette(&live_snapshot(&bridge), None);
         super::i18n::set_language(
             live_snapshot(&bridge)
                 .value("appearance.language")
@@ -1579,6 +1705,7 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(wndproc),
             hInstance: GetModuleHandleW(null()),
+            hIcon: app_icon(),
             hCursor: LoadCursorW(null_mut(), IDC_ARROW),
             hbrBackground: GetStockObject(WHITE_BRUSH) as HBRUSH,
             lpszClassName: class.as_ptr(),
@@ -1586,7 +1713,7 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
         };
         if RegisterClassW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
             DeleteObject(brush);
-            bail!("无法注册机控窗口：{}", GetLastError());
+            bail!("无法注册拯救者工具箱窗口：{}", GetLastError());
         }
         let initial_dpi = GetDpiForSystem().max(96);
         let initial_width = (1250 * initial_dpi as i32 / 96)
@@ -1627,16 +1754,21 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
             notice: null_mut(),
             rendered_revision: u64::MAX,
             metadata_revision: u64::MAX,
+            backend_state: u8::MAX,
             scroll: 0,
+            scrolling: Scrolling::default(),
             content_height: 0,
             pending: BTreeMap::new(),
             rendering: false,
+            layout_posted: false,
+            preview_theme: None,
+            feedback_until: None,
             tray: false,
             tray_data: zeroed(),
             taskbar_message: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
             show_message: RegisterWindowMessageW(wide("Jiks.ShowExisting.1").as_ptr()),
             popup: super::status_popup::StatusPopup::default(),
-            column_x: 132,
+            column_x: CONTENT_X,
             started: Instant::now(),
             smoke_submitted: false,
             smoke_stage: 0,
@@ -1655,7 +1787,7 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
         let hwnd = CreateWindowExW(
             0,
             class.as_ptr(),
-            wide("机控 / Jiks").as_ptr(),
+            wide("拯救者工具箱").as_ptr(),
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VSCROLL,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -1668,7 +1800,7 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
         );
         if hwnd.is_null() {
             drop(Box::from_raw(raw));
-            bail!("无法创建机控窗口：{}", GetLastError());
+            bail!("无法创建拯救者工具箱窗口：{}", GetLastError());
         }
         a11y::annotate(hwnd, "main", None, None);
         let instance_key = (*raw).borrow().bridge.instance_key.clone();
@@ -1676,7 +1808,7 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
             if SetPropW(hwnd, wide(&key).as_ptr(), 1usize as HANDLE) == 0 {
                 DestroyWindow(hwnd);
                 drop(Box::from_raw(raw));
-                bail!("无法标记机控实例窗口");
+                bail!("无法标记拯救者工具箱实例窗口");
             }
         }
         let minimized = (*raw).borrow().bridge.start_minimized;
@@ -1690,15 +1822,24 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
         );
         UpdateWindow(hwnd);
         let mut msg: MSG = zeroed();
+        let mut messages = ScrollMessages::default();
         let mut failure = None;
         loop {
-            let result = GetMessageW(&mut msg, null_mut(), 0, 0);
+            let timer = (*raw).try_borrow().ok().and_then(|app| app.scrolling.wait_timer());
+            let Some(result) = messages.next(hwnd, &mut msg, timer) else {
+                continue;
+            };
             if result == 0 {
                 break;
             }
             if result == -1 {
                 failure = Some(anyhow!("窗口消息失败：{}", GetLastError()));
                 break;
+            }
+            #[cfg(debug_assertions)]
+            if msg.message == WM_MOUSEWHEEL {
+                let delta = ((msg.wParam >> 16) as u16) as i16;
+                super::scroll_trace::record("input", i64::from(delta), GetDlgCtrlID(msg.hwnd) as i64);
             }
             if msg.message == WM_KEYDOWN && GetAncestor(msg.hwnd, GA_ROOT) == hwnd {
                 if let Ok(mut app) = (*raw).try_borrow_mut() {
@@ -1711,6 +1852,8 @@ pub(super) fn run(bridge: UiBridge) -> Result<()> {
                         ) {
                             app.capture();
                             app.page = page;
+                            let hwnd = app.hwnd;
+                            app.scrolling.cancel(hwnd);
                             app.scroll = 0;
                             app.render();
                             continue;
@@ -1769,6 +1912,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
         if let Some(result) = presentation_message(msg, wp, lp) {
             return result;
         }
+        // Default WM_PRINT calls our WM_PRINTCLIENT synchronously. Delegate
+        // before acquiring App so both on-screen and print paint have a page.
+        if msg == WM_PRINT {
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
         let (result, destroy, editor, bridge) = {
             let Ok(mut app) = (*raw).try_borrow_mut() else {
                 let diag =
@@ -1816,6 +1964,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
             }
             let editor = app.deferred_editor.take();
             if editor.is_some() {
+                app.scrolling.cancel(hwnd);
                 app.modal_active = true;
             }
             (result, destroy, editor, app.bridge.clone())
@@ -1916,6 +2065,7 @@ unsafe fn dispatch_window(app: &mut App, msg: u32, wp: usize, lp: isize) -> Opti
             WM_CREATE => {
                 app.dpi = GetDpiForWindow(app.hwnd).max(96);
                 app.make_fonts();
+                apply_window_chrome(app.hwnd);
                 app.build_fixed();
                 app.render();
                 app.add_tray();
@@ -1926,14 +2076,23 @@ unsafe fn dispatch_window(app: &mut App, msg: u32, wp: usize, lp: isize) -> Opti
                 Some(0)
             }
             WM_SIZE => {
+                if wp == SIZE_MINIMIZED as usize {
+                    app.scrolling.cancel(app.hwnd);
+                }
                 if wp == SIZE_MINIMIZED as usize
                     && snapshot(&app.bridge).preferences.minimize_to_tray
                     && app.tray
                 {
                     ShowWindow(app.hwnd, SW_HIDE);
-                } else {
+                } else if wp != SIZE_MINIMIZED as usize && !app.layout_posted {
+                    app.layout_posted = PostMessageW(app.hwnd, WM_RELAYOUT, 0, 0) != 0;
+                }
+                Some(0)
+            }
+            WM_RELAYOUT => {
+                app.layout_posted = false;
+                if IsIconic(app.hwnd) == 0 {
                     app.capture();
-                    app.layout_fixed();
                     app.render();
                 }
                 Some(0)
@@ -1958,6 +2117,12 @@ unsafe fn dispatch_window(app: &mut App, msg: u32, wp: usize, lp: isize) -> Opti
                 app.save_window();
                 Some(0)
             }
+            WM_ENABLE | WM_CANCELMODE | WM_ENTERSIZEMOVE | WM_ENTERMENULOOP
+                if msg != WM_ENABLE || wp == 0 =>
+            {
+                app.scrolling.cancel(app.hwnd);
+                None
+            }
             WM_DPICHANGED => {
                 app.capture();
                 app.dpi = (wp & 0xffff) as u32;
@@ -1980,37 +2145,35 @@ unsafe fn dispatch_window(app: &mut App, msg: u32, wp: usize, lp: isize) -> Opti
                 app.refresh();
                 Some(0)
             }
+            WM_TIMER if wp == SCROLL_TIMER => {
+                if let Some(next) = app.scrolling.frame(app.hwnd, app.scroll) {
+                    app.scroll = next;
+                    app.position_content();
+                }
+                Some(0)
+            }
             WM_COMMAND => {
+                if lp != 0 && matches!(((wp >> 16) & 0xffff) as u32, BN_CLICKED | CBN_DROPDOWN) {
+                    app.scrolling.cancel(app.hwnd);
+                }
                 if !app.rendering {
                     app.command((wp & 0xffff) as u16, ((wp >> 16) & 0xffff) as u16);
                 }
                 Some(0)
             }
-            WM_VSCROLL => {
-                let command = (wp & 0xffff) as i32;
-                let old = app.scroll;
-                app.scroll = match command {
-                    SB_LINEUP => old - 32,
-                    SB_LINEDOWN => old + 32,
-                    SB_PAGEUP => old - 240,
-                    SB_PAGEDOWN => old + 240,
-                    SB_THUMBTRACK | SB_THUMBPOSITION => {
-                        let mut si: SCROLLINFO = zeroed();
-                        si.cbSize = size_of::<SCROLLINFO>() as u32;
-                        si.fMask = SIF_TRACKPOS;
-                        GetScrollInfo(app.hwnd, SB_VERT, &mut si);
-                        si.nTrackPos
-                    }
-                    SB_TOP => 0,
-                    SB_BOTTOM => app.content_height,
-                    _ => old,
-                };
-                app.position_content();
+            WM_VSCROLL if lp == 0 => {
+                let next = app.scrolling.command(app.hwnd, app.scroll, (wp & 0xffff) as i32);
+                if next != app.scroll {
+                    app.scroll = next;
+                    app.position_content();
+                }
                 Some(0)
             }
             WM_MOUSEWHEEL => {
-                app.scroll -= ((wp >> 16) as u16 as i16 as i32) / 120 * 64;
-                app.position_content();
+                if let Some(next) = app.scrolling.wheel(app.hwnd, app.scroll, wp) {
+                    app.scroll = next;
+                    app.position_content();
+                }
                 Some(0)
             }
             WM_DRAWITEM => {
@@ -2049,15 +2212,18 @@ unsafe fn dispatch_window(app: &mut App, msg: u32, wp: usize, lp: isize) -> Opti
                     }) as isize
                 })
             }
-            WM_ERASEBKGND => {
-                app.paint_client(wp as HDC);
-                Some(1)
-            }
+            // WM_PAINT already fills the invalid region. An erase pass here
+            // would draw the cards twice and expose a separate frame of paint.
+            WM_ERASEBKGND => Some(1),
             WM_PAINT => {
                 let mut ps: PAINTSTRUCT = zeroed();
                 let dc = BeginPaint(app.hwnd, &mut ps);
+                #[cfg(debug_assertions)]
+                super::scroll_trace::record("paint-start", app.scroll as i64, (ps.rcPaint.bottom - ps.rcPaint.top) as i64);
                 app.paint_client(dc);
                 EndPaint(app.hwnd, &ps);
+                #[cfg(debug_assertions)]
+                super::scroll_trace::record("paint-end", app.scroll as i64, 0);
                 Some(0)
             }
             WM_PRINTCLIENT => {
@@ -2075,6 +2241,7 @@ unsafe fn dispatch_window(app: &mut App, msg: u32, wp: usize, lp: isize) -> Opti
                 Some(0)
             }
             WM_CLOSE => {
+                app.scrolling.cancel(app.hwnd);
                 app.bridge
                     .diagnostics
                     .window_close_messages
@@ -2104,6 +2271,7 @@ unsafe fn dispatch_window(app: &mut App, msg: u32, wp: usize, lp: isize) -> Opti
                 None
             }
             WM_DESTROY => {
+                app.scrolling.cancel(app.hwnd);
                 app.bridge
                     .diagnostics
                     .window_destroy_messages
@@ -2188,25 +2356,15 @@ impl App {
             let brand = create(
                 self.hwnd,
                 "STATIC",
-                &super::i18n::tr("机控"),
-                1,
+                "",
+                SS_ICON | SS_CENTERIMAGE,
                 0,
-                [self.s(12), self.s(20), self.s(88), self.s(30)],
+                [self.s(10), self.s(14), self.s(76), self.s(62)],
                 self.heading_font,
             );
+            SendMessageW(brand, STM_SETICON, app_icon() as usize, 0);
             self.fixed.push(brand);
-            a11y::annotate(brand, "main.brand", None, None);
-            let sub = create(
-                self.hwnd,
-                "STATIC",
-                "Jiks",
-                1,
-                0,
-                [self.s(12), self.s(54), self.s(88), self.s(22)],
-                self.body_font,
-            );
-            self.fixed.push(sub);
-            a11y::annotate(sub, "main.subtitle", None, None);
+            a11y::annotate(brand, "main.brand", Some("拯救者工具箱"), None);
             for (index, page) in Page::ALL.iter().enumerate() {
                 let h = create(
                     self.hwnd,
@@ -2215,10 +2373,10 @@ impl App {
                     BS_OWNERDRAW as u32 | WS_TABSTOP,
                     ID_NAV + index as u16,
                     [
-                        self.s(12),
-                        self.s(92 + index as i32 * 54),
-                        self.s(88),
-                        self.s(50),
+                        self.s(10),
+                        self.s(VIEW_TOP + index as i32 * 49),
+                        self.s(76),
+                        self.s(46),
                     ],
                     self.body_font,
                 );
@@ -2253,7 +2411,7 @@ impl App {
             let exit = create(
                 self.hwnd,
                 "BUTTON",
-                &super::i18n::tr("退出机控"),
+                &super::i18n::tr("退出"),
                 BS_OWNERDRAW as u32 | WS_TABSTOP,
                 ID_EXIT,
                 [0, 0, 0, 0],
@@ -2261,7 +2419,7 @@ impl App {
             );
             self.fixed.push(exit);
             a11y::annotate(exit, "main.exit", None, None);
-            for (id, label) in [(ID_DEVICE, "设备"), (ID_LOG, "日志"), (ID_THEME, "主题")] {
+            for (id, label) in [(ID_DEVICE, "设备信息"), (ID_LOG, "日志"), (ID_THEME, "切换主题")] {
                 let h = create(
                     self.hwnd,
                     "BUTTON",
@@ -2287,21 +2445,22 @@ impl App {
                 self.hwnd,
                 "STATIC",
                 self.page.title(),
-                0,
+                SS_CENTERIMAGE | SS_NOPREFIX,
                 0,
                 [0, 0, 0, 0],
                 self.title_font,
             );
             self.fixed.push(self.title);
             a11y::annotate(self.title, "main.page-title", None, None);
-            self.machine = create(self.hwnd, "STATIC", "", 0, 0, [0, 0, 0, 0], self.body_font);
+            self.machine = create(self.hwnd, "STATIC", "", SS_CENTERIMAGE | SS_ENDELLIPSIS | SS_NOPREFIX, 0, [0, 0, 0, 0], self.body_font);
             self.fixed.push(self.machine);
             a11y::annotate(self.machine, "main.machine", None, None);
+            presentation_flag(self.machine, "Jiks.Muted", true);
             self.notice = create(
                 self.hwnd,
                 "STATIC",
                 "",
-                SS_LEFT as u32,
+                SS_CENTERIMAGE | SS_ENDELLIPSIS | SS_NOPREFIX,
                 0,
                 [0, 0, 0, 0],
                 self.body_font,
@@ -2318,15 +2477,18 @@ impl App {
             let (w, h) = self.size();
             // A short client area uses one native scrolling navigation list.
             // Main and footer items never occupy the same row.
-            let compact_nav = h < 642;
+            let nav_bottom = h - FOOTER_HEIGHT - 5;
+            let nav_space = nav_bottom - VIEW_TOP;
+            let nav_step = ((nav_space - 12) / Page::ALL.len() as i32).clamp(39, 54);
+            let compact_nav = nav_space < Page::ALL.len() as i32 * 39 + 12;
             let nav = GetDlgItem(self.hwnd, ID_NAV_LIST as i32);
             SetWindowPos(
                 nav,
                 null_mut(),
-                self.s(12),
-                self.s(92),
-                self.s(88),
-                self.s((h - 162).max(76)),
+                self.s(10),
+                self.s(VIEW_TOP),
+                self.s(76),
+                self.s((h - VIEW_TOP - FOOTER_HEIGHT - 8).max(76)),
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
             SendMessageW(
@@ -2343,7 +2505,11 @@ impl App {
                 );
                 let page = Page::ALL[index];
                 let control = GetDlgItem(self.hwnd, ID_NAV as i32 + index as i32);
-                if page == self.page {
+                let y = if index < 6 { VIEW_TOP + index as i32 * nav_step }
+                    else { nav_bottom - (Page::ALL.len() - index) as i32 * nav_step };
+                SetWindowPos(control, null_mut(), self.s(10), self.s(y), self.s(76), self.s(nav_step - 3), SWP_NOZORDER | SWP_NOACTIVATE);
+                let selected = page == self.page || (page == Page::Dashboard && matches!(self.page, Page::Performance | Page::Display | Page::Graphics));
+                if selected {
                     presentation_flag(control, "Jiks.Selected", true);
                 } else {
                     presentation_flag(control, "Jiks.Selected", false);
@@ -2353,28 +2519,19 @@ impl App {
                     GetDlgItem(self.hwnd, ID_NAV as i32 + index as i32),
                     &a11y::key("main", "navigate", page.key()),
                     Some(page.title()),
-                    (page == self.page).then(|| super::i18n::tr_static("当前页面")),
+                    selected.then(|| super::i18n::tr_static("当前页面")),
                 );
             }
-            for index in 6..Page::ALL.len() {
-                SetWindowPos(
-                    GetDlgItem(self.hwnd, ID_NAV as i32 + index as i32),
-                    null_mut(),
-                    self.s(12),
-                    self.s(h - 222 + (index as i32 - 6) * 54),
-                    self.s(88),
-                    self.s(50),
-                    SWP_NOZORDER | SWP_NOACTIVATE,
-                );
-            }
+            let right = w - CONTENT_RIGHT;
+            let toolbar_x = right - 278;
             for (hwnd, x, y, width, height) in [
-                (GetDlgItem(self.hwnd, ID_EXIT as i32), 12, h - 52, 88, 32),
-                (self.title, 132, 25, w - 392, 40),
-                (GetDlgItem(self.hwnd, ID_DEVICE as i32), w - 240, 30, 66, 30),
-                (GetDlgItem(self.hwnd, ID_LOG as i32), w - 166, 30, 66, 30),
-                (GetDlgItem(self.hwnd, ID_THEME as i32), w - 92, 30, 66, 30),
-                (self.machine, 134, 72, w - 156, 24),
-                (self.notice, 132, h - 48, w - 154, 40),
+                (GetDlgItem(self.hwnd, ID_EXIT as i32), 10, h - 39, 76, 30),
+                (self.title, CONTENT_X, 14, toolbar_x - CONTENT_X - 14, 38),
+                (GetDlgItem(self.hwnd, ID_DEVICE as i32), toolbar_x, 18, 106, 34),
+                (GetDlgItem(self.hwnd, ID_LOG as i32), toolbar_x + 114, 18, 62, 34),
+                (GetDlgItem(self.hwnd, ID_THEME as i32), toolbar_x + 184, 18, 94, 34),
+                (self.machine, CONTENT_X, 57, right - CONTENT_X, 25),
+                (self.notice, CONTENT_X, h - FOOTER_HEIGHT + 6, right - CONTENT_X, 34),
             ] {
                 SetWindowPos(
                     hwnd,
@@ -2399,7 +2556,7 @@ impl App {
         font: HFONT,
     ) -> HWND {
         unsafe {
-            let h = create(
+            let h = create_control(
                 self.hwnd,
                 class,
                 label,
@@ -2413,12 +2570,14 @@ impl App {
                 ],
                 font,
             );
-            self.content.push(Placed {
-                hwnd: h,
+            install_wheel_routing(h, class);
+            self.content.push(ScrollChild::new(
+                h,
                 rect,
-                clip_height: if class == "COMBOBOX" { 30 } else { rect[3] },
-                pinned: id >= ID_TOOL_NAV && id < ID_TOOL_NAV + 8,
-            });
+                if class == "COMBOBOX" { CONTROL_HEIGHT } else { rect[3] },
+                id >= ID_TOOL_NAV && id < ID_TOOL_NAV + 8,
+            ));
+            presentation_flag(h, "Jiks.Pane", true);
             if !(id >= ID_TOOL_NAV && id < ID_TOOL_NAV + 8) {
                 self.surface_children.insert(h as usize);
                 presentation_flag(h, "Jiks.Surface", true);
@@ -2431,7 +2590,7 @@ impl App {
             self.placed(
                 "STATIC",
                 label,
-                SS_LEFT as u32,
+                SS_LEFT | SS_NOPREFIX,
                 0,
                 [self.column_x, y, width, height],
                 if large {
@@ -2457,32 +2616,31 @@ impl App {
     unsafe fn paint_surfaces(&self, dc: HDC) {
         unsafe {
             let (width, height) = self.size();
-            // Match the original frame: quiet sidebar, distinct content pane,
-            // and a compact status strip rather than heavy dividing rules.
+            // The page viewport has its own surface, like the original frame.
             if !self.background.visible() {
                 fill(
                     dc,
                     &RECT {
-                        left: 0,
-                        top: 0,
-                        right: self.s(width),
-                        bottom: self.s(height),
+                        left: self.s(CONTENT_X - 12),
+                        top: self.s(VIEW_TOP),
+                        right: self.s(width - 12),
+                        bottom: self.s(height - FOOTER_HEIGHT),
                     },
-                    paper(),
+                    pane(),
                 );
             }
             let saved = SaveDC(dc);
             IntersectClipRect(
                 dc,
-                self.s(124),
-                self.s(114),
-                self.s(width - 16),
-                self.s(height - 58),
+                self.s(CONTENT_X - 12),
+                self.s(VIEW_TOP),
+                self.s(width - 12),
+                self.s(height - FOOTER_HEIGHT),
             );
             for card in &self.cards {
                 let [x, y, w, h] = card.rect;
                 let y = y - self.scroll;
-                if y + h > 114 && y < height - 58 {
+                if y + h > VIEW_TOP && y < height - FOOTER_HEIGHT {
                     paint_card(
                         dc,
                         &RECT {
@@ -2514,44 +2672,72 @@ impl App {
             RestoreDC(dc, saved);
             let pen = CreatePen(PS_SOLID, 1, line());
             let old = SelectObject(dc, pen);
-            MoveToEx(dc, self.s(132), self.s(height - 56), null_mut());
-            LineTo(dc, self.s(width - 20), self.s(height - 56));
+            MoveToEx(dc, self.s(CONTENT_X), self.s(height - FOOTER_HEIGHT + 3), null_mut());
+            LineTo(dc, self.s(width - CONTENT_RIGHT), self.s(height - FOOTER_HEIGHT + 3));
             SelectObject(dc, old);
             DeleteObject(pen);
         }
     }
-    unsafe fn metric(&mut self, metric: &UiMetric, y: i32, width: i32) {
+    unsafe fn measured_height(&self, dc: HDC, value: &str, width: i32, font: HFONT) -> i32 {
+        if value.is_empty() {
+            return 0;
+        }
+        if dc.is_null() {
+            return 24;
+        }
+        unsafe {
+            let old = SelectObject(dc, font);
+            let mut rect = RECT { left: 0, top: 0, right: self.s(width), bottom: 0 };
+            DrawTextW(dc, wide(value).as_ptr(), -1, &mut rect, DT_CALCRECT | DT_NOPREFIX | DT_WORDBREAK);
+            SelectObject(dc, old);
+            ((rect.bottom * 96 + self.dpi as i32 - 1) / self.dpi as i32).max(16) + 3
+        }
+    }
+    unsafe fn measured_button_width(&self, dc: HDC, value: &str) -> i32 {
+        if dc.is_null() { return (value.chars().count() as i32 * 14 + 28).max(72); }
+        unsafe {
+            let old = SelectObject(dc, self.body_font);
+            let mut rect: RECT = zeroed();
+            DrawTextW(dc, wide(value).as_ptr(), -1, &mut rect, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+            SelectObject(dc, old);
+            ((rect.right * 96 + self.dpi as i32 - 1) / self.dpi as i32 + 28).max(72)
+        }
+    }
+    unsafe fn metric(&mut self, metric: &UiMetric, y: i32, width: i32, compact: bool) {
         unsafe {
             let origin = self.column_x;
-            let value_width = (width / 3).clamp(92, 160);
-            let detail_width = (width / 4).clamp(64, 180);
-            let name_width = (width - value_width - detail_width - 16).max(80);
-            let name = self.label(&metric.label, y + 3, name_width, false, 24);
+            let value_width = (width * 42 / 100).clamp(70, 140);
+            let detail_width = if compact { 0 } else { (width / 4).clamp(64, 180) + 8 };
+            let name_width = (width - value_width - detail_width - 8).max(24);
+            let name = self.placed(
+                "STATIC", metric_caption(metric, compact), SS_CENTERIMAGE | SS_ENDELLIPSIS | SS_NOPREFIX,
+                0, [origin, y, name_width, 26], self.body_font,
+            );
             self.column_x = origin + name_width + 8;
             let value = self.placed(
                 "STATIC",
                 &metric.value,
-                2 | 0x4000,
+                SS_RIGHT | SS_CENTERIMAGE | SS_ENDELLIPSIS | SS_NOPREFIX,
                 0,
                 [self.column_x, y, value_width, 26],
-                self.heading_font,
-            );
-            self.column_x += value_width + 8;
-            let detail = self.placed(
-                "STATIC",
-                &metric.detail,
-                2 | 0x4000,
-                0,
-                [self.column_x, y + 3, detail_width, 24],
                 self.body_font,
             );
-            self.muted_labels.insert(detail as usize);
-            presentation_flag(detail, "Jiks.Muted", true);
             let scope = self.accessibility_scope();
+            let detail = if compact {
+                null_mut()
+            } else {
+                let detail = self.placed(
+                    "STATIC", &metric.detail, SS_RIGHT | SS_CENTERIMAGE | SS_ENDELLIPSIS | SS_NOPREFIX,
+                    0, [self.column_x + value_width + 8, y, detail_width - 8, 26], self.body_font,
+                );
+                presentation_flag(detail, "Jiks.Muted", true);
+                a11y::annotate(detail, &a11y::key(&scope, "metric-detail", &metric.key), None, None);
+                detail
+            };
             a11y::annotate(
                 name,
                 &a11y::key(&scope, "metric-label", &metric.key),
-                None,
+                Some(&metric.label),
                 None,
             );
             a11y::annotate(
@@ -2561,21 +2747,59 @@ impl App {
                     "{} {} {}",
                     metric.label, metric.value, metric.detail
                 )),
-                None,
-            );
-            a11y::annotate(
-                detail,
-                &a11y::key(&scope, "metric-detail", &metric.key),
-                None,
-                None,
+                Some(&metric.detail),
             );
             self.metrics.push(MetricPlacement {
                 name,
                 value,
                 detail,
                 key: metric.key.clone(),
+                compact,
             });
             self.column_x = origin;
+        }
+    }
+    unsafe fn render_actions(
+        &mut self, actions: Vec<Action>, scope: &str, next_button: &mut u16, dc: HDC, bounds: [i32; 3], model: &UiModel,
+    ) -> i32 {
+        unsafe {
+            let [left, mut y, width] = bounds;
+            let mut x = left;
+            let mut primary_used = false;
+            for action in actions {
+                let link = matches!(action.kind, ActionKind::Document(_) | ActionKind::SensorSettings | ActionKind::Navigate(_));
+                let button_width = if link { width } else { self.measured_button_width(dc, action.label).min(width) };
+                if x != left && (link || x + button_width > left + width) {
+                    x = left;
+                    y += CONTROL_HEIGHT + 8;
+                }
+                let id = *next_button;
+                *next_button += 1;
+                let h = self.placed(
+                    "BUTTON", action.label, BS_OWNERDRAW as u32 | WS_TABSTOP, id,
+                    [x, y, button_width, if link { 44 } else { CONTROL_HEIGHT }], self.body_font,
+                );
+                if link {
+                    presentation_flag(h, "Jiks.ActionCard", true);
+                } else if !primary_used && matches!(&action.kind, ActionKind::Execute { command, confirm: None, .. }
+                    if command.ends_with(".save") || command.ends_with(".apply")) {
+                    presentation_flag(h, "Jiks.Primary", true);
+                    primary_used = true;
+                }
+                let unavailable = (!action.capability.is_empty() && !model.can(action.capability))
+                    .then(|| model.unavailable_reason(action.capability));
+                a11y::annotate(h, &a11y::key(scope, "action", &action_key(&action)), None, unavailable.as_deref());
+                if unavailable.is_some() {
+                    EnableWindow(h, 0);
+                }
+                self.buttons.insert(id, action);
+                if link {
+                    y += 52;
+                } else {
+                    x += button_width + 8;
+                }
+            }
+            if x != left { y + CONTROL_HEIGHT + 8 } else { y }
         }
     }
     unsafe fn render(&mut self) {
@@ -2583,6 +2807,8 @@ impl App {
             if self.hwnd.is_null() {
                 return;
             }
+            #[cfg(debug_assertions)]
+            super::scroll_trace::record("rebuild", self.scroll as i64, 0);
             self.bridge
                 .diagnostics
                 .main_rebuilds
@@ -2601,24 +2827,25 @@ impl App {
             let model = snapshot(&self.bridge);
             self.rendered_revision = model.revision;
             self.metadata_revision = model.metadata_revision;
+            self.backend_state = backend_state(&model);
             let (w, _) = self.size();
-            let width = (w - 156).max(360);
-            let mut y = 124;
-            self.column_x = 132;
-            let mut content_origin = 132;
+            let width = (w - CONTENT_X - CONTENT_RIGHT).max(260);
+            let mut y = VIEW_TOP + 16;
+            self.column_x = CONTENT_X;
+            let measure_dc = GetDC(self.hwnd);
+            let mut content_origin = CONTENT_X;
             let mut content_width = width;
             if self.page == Page::Settings {
-                let nav_width = if width >= 650 { 190 } else { 64 };
+                let nav_width = if width >= 680 { 184 } else { 140 };
                 for (index, title) in catalog::TOOL_TABS.iter().enumerate() {
                     let translated = super::i18n::tr(title);
                     let title = translated.as_ref();
-                    let short = title.chars().take(2).collect::<String>();
                     let button = self.placed(
                         "BUTTON",
-                        if nav_width < 100 { &short } else { title },
+                        title,
                         BS_OWNERDRAW as u32 | WS_TABSTOP,
                         ID_TOOL_NAV + index as u16,
-                        [132, 124 + index as i32 * 44, nav_width, 38],
+                        [CONTENT_X, y + index as i32 * 42, nav_width, 37],
                         self.body_font,
                     );
                     if index == self.tools_tab {
@@ -2631,80 +2858,53 @@ impl App {
                         (index == self.tools_tab).then(|| super::i18n::tr_static("当前页面")),
                     );
                 }
-                content_origin = 132 + nav_width + 20;
-                content_width = (width - nav_width - 20).max(250);
+                content_origin = CONTENT_X + nav_width + GROUP_GAP;
+                content_width = (width - nav_width - GROUP_GAP).max(1);
             }
             if self.page == Page::Dashboard {
                 let groups = super::sensors::groups(&model);
-                let columns = if width > 780 { 2 } else { 1 };
-                let mut bottoms = [y, y];
-                let mut pair_y = y;
-                for (index, group) in groups.into_iter().enumerate() {
-                    let column = index % columns;
-                    if column == 0 {
-                        pair_y = bottoms[0].max(bottoms[1]);
+                let columns = if width >= 920 { 4 } else if width >= 444 { 2 } else { 1 };
+                let card_width = (width - (columns - 1) * 10) / columns;
+                for row in groups.chunks(columns as usize) {
+                    let card_height = 48 + 26 * row.iter().map(|g| g.metrics.len()).max().unwrap_or(0) as i32;
+                    for (column, group) in row.iter().enumerate() {
+                        let card_x = CONTENT_X + column as i32 * (card_width + 10);
+                        self.column_x = card_x + 12;
+                        let heading = self.label(&group.title, y + 10, card_width - 24, true, 27);
+                        if let Some(first) = group.metrics.first() {
+                            a11y::annotate(heading, &a11y::key("main.dashboard", "group", &first.key), None, None);
+                        }
+                        for (index, metric) in group.metrics.iter().enumerate() {
+                            self.metric(metric, y + 35 + index as i32 * 26, card_width - 24, true);
+                        }
+                        self.cards.push(CardSurface { icon: None, rect: [card_x, y, card_width, card_height] });
                     }
-                    let card_x = 132 + column as i32 * (width / columns as i32);
-                    let card_width = width / columns as i32 - 12;
-                    let card_top = pair_y;
-                    let mut group_y = card_top + 16;
-                    self.column_x = card_x + 16;
-                    let heading = self.label(&group.title, group_y, card_width - 32, true, 28);
-                    if let Some(first) = group.metrics.first() {
-                        a11y::annotate(
-                            heading,
-                            &a11y::key("main.dashboard", "group", &first.key),
-                            None,
-                            None,
-                        );
-                    }
-                    group_y += 38;
-                    for metric in group.metrics {
-                        self.metric(&metric, group_y, card_width - 32);
-                        group_y += 36;
-                    }
-                    self.cards.push(CardSurface {
-                        icon: None,
-                        rect: [card_x, card_top, card_width, group_y - card_top + 10],
-                    });
-                    bottoms[column] = group_y + 26;
+                    y += card_height + 12;
                 }
-                y = bottoms[0].max(bottoms[1]);
-                self.column_x = 132;
-                if self.metrics.is_empty()
-                    && model
-                        .documents
-                        .get("dashboard")
-                        .and_then(|d| d.value.get("ShowSensors"))
-                        .and_then(Value::as_bool)
-                        != Some(false)
-                {
-                    self.label(&super::i18n::tr("传感器数据尚不可用"), y, width, false, 28);
-                    y += 44;
-                }
+                self.column_x = CONTENT_X;
             } else if self.page == Page::Battery {
                 let top = y;
-                self.column_x = 148;
+                self.column_x = CONTENT_X + 16;
                 for metric in model
                     .metrics
                     .iter()
                     .filter(|m| m.key.to_ascii_lowercase().starts_with("battery"))
                 {
-                    self.metric(metric, y + 16, width - 32);
-                    y += 36;
+                    self.metric(metric, y + 16, width - 32, width < 600);
+                    y += 28;
                 }
                 if y > top {
                     self.cards.push(CardSurface {
                         icon: None,
-                        rect: [132, top, width, y - top + 26],
+                        rect: [CONTENT_X, top, width, y - top + 26],
                     });
                     y += 42;
                 }
             } else if self.page == Page::About {
                 let top = y;
-                self.column_x = 152;
+                self.column_x = CONTENT_X + 20;
                 let name = self.label(
-                    &super::i18n::tr("机控 / Jiks"),
+                    &super::i18n::tr("拯救者工具箱"),
                     y + 18,
                     width - 40,
                     true,
@@ -2729,25 +2929,25 @@ impl App {
                 );
                 self.cards.push(CardSurface {
                     icon: None,
-                    rect: [132, top, width, 144],
+                    rect: [CONTENT_X, top, width, 144],
                 });
                 y += 160;
             }
             let sections = catalog::sections(self.page, self.tools_tab, &model);
             let mut next_field = 1000u16;
             let mut next_button = 2000u16;
-            let two_columns = self.page == Page::Dashboard && width > 970;
+            let two_columns = self.page == Page::Dashboard && width >= 830;
             let full_width = content_width;
             let mut bottoms = [y, y];
             let mut pair_y = y;
             for (section_index, section) in sections.into_iter().enumerate() {
                 let column = if two_columns { section_index % 2 } else { 0 };
                 let width = if two_columns {
-                    (full_width - 24) / 2
+                    (full_width - GROUP_GAP) / 2
                 } else {
                     full_width
                 };
-                let card_x = content_origin + column as i32 * (width + 24);
+                let card_x = content_origin + column as i32 * (width + GROUP_GAP);
                 self.column_x = card_x + 16;
                 let width = width - 32;
                 if two_columns {
@@ -2764,7 +2964,8 @@ impl App {
                     .or_else(|| section.actions.first().map(action_key))
                     .unwrap_or_else(|| "content".into());
                 let section_scope = a11y::key(&self.accessibility_scope(), "section", &section_key);
-                let heading = self.label(&section.title, y, width, true, 30);
+                let heading_height = self.measured_height(measure_dc, &section.title, width, self.heading_font).max(27);
+                let heading = self.label(&section.title, y, width, true, heading_height);
                 self.surface_children.remove(&(heading as usize));
                 presentation_flag(heading, "Jiks.Surface", false);
                 a11y::annotate(
@@ -2773,214 +2974,157 @@ impl App {
                     None,
                     None,
                 );
-                y += 38;
-                let hint_height = if width < 440 { 52 } else { 38 };
-                let hint = self.label(section.hint, y, width, false, hint_height);
-                self.muted_labels.insert(hint as usize);
-                presentation_flag(hint, "Jiks.Muted", true);
-                self.surface_children.remove(&(hint as usize));
-                presentation_flag(hint, "Jiks.Surface", false);
-                a11y::annotate(
-                    hint,
-                    &a11y::key(&section_scope, "text", "description"),
-                    None,
-                    None,
-                );
-                y += hint_height + 12;
+                y += heading_height + 6;
+                let description = if section_key == "battery.threshold.read" {
+                    match model.capabilities.get("battery.threshold.apply") {
+                        Some(cap) if !cap.reason.is_empty() => std::borrow::Cow::Borrowed(cap.reason.as_str()),
+                        _ => super::i18n::tr("正在检测本机充电阈值…"),
+                    }
+                } else {
+                    super::i18n::tr(section.hint)
+                };
+                let hint_height = self.measured_height(measure_dc, &description, width, self.body_font);
+                if hint_height > 0 {
+                    let hint = self.label(&description, y, width, false, hint_height);
+                    presentation_flag(hint, "Jiks.Muted", true);
+                    self.surface_children.remove(&(hint as usize));
+                    presentation_flag(hint, "Jiks.Surface", false);
+                    a11y::annotate(hint, &a11y::key(&section_scope, "text", "description"), None, None);
+                    y += hint_height + 6;
+                }
+                y += 8;
+                let mut attached_actions: BTreeMap<&str, Vec<Action>> = BTreeMap::new();
+                let mut remaining_actions = Vec::new();
+                for action in section.actions {
+                    // The overview keeps each Apply button beside its inputs.
+                    // The detailed pages keep grouped actions in the footer.
+                    let anchor = if self.page == Page::Dashboard {
+                        match &action.kind {
+                            ActionKind::Execute { command, .. } if matches!(*command, "gpu.refresh" | "gpu.processes.refresh") =>
+                                section.fields.iter().find(|f| f.key == "selection.gpu.processes").map(|f| f.key),
+                            ActionKind::Execute { fields, .. } | ActionKind::Cancel(fields) =>
+                                section.fields.iter().rev().find(|f| fields.contains(&f.key)).map(|f| f.key),
+                            ActionKind::Structured { collection: "presets", .. } =>
+                                section.fields.iter().find(|f| f.key == "selection.presets").map(|f| f.key),
+                            _ => None,
+                        }
+                    } else { None };
+                    if let Some(key) = anchor {
+                        attached_actions.entry(key).or_default().push(action);
+                    } else {
+                        remaining_actions.push(action);
+                    }
+                }
                 for spec in section.fields {
-                    let header_x = self.column_x;
                     let row_top = y;
+                    let mut row = RowColumns::new(card_x, width + 32, matches!(spec.kind, FieldKind::Toggle));
+                    let value = self.drafts.get(spec.key).cloned().unwrap_or_else(|| model.value(spec.key));
+                    let options = field_options(&model, &spec);
+                    let editable = field_available(&model, spec.key, spec.capability)
+                        && !matches!(spec.kind, FieldKind::ReadOnly)
+                        && options.as_ref().is_none_or(|items| !items.is_empty());
+                    let show_list = editable && matches!(spec.kind, FieldKind::Collection("automation" | "macros" | "packages"));
+                    let control_height = if show_list {
+                        row.label_width = card_x + width + 18 - row.label_x;
+                        row.control_x = row.label_x;
+                        row.control_width = row.label_width;
+                        row.stacked = true;
+                        8 + options.as_ref().map_or(0, |items| items.len().clamp(2, 5) as i32) * 28
+                    } else {
+                        CONTROL_HEIGHT
+                    };
+                    let picker = main_picker(spec.key)
+                        .filter(|_| editable && matches!(spec.kind, FieldKind::Text));
+                    let field_label = model.ranges.get(spec.key)
+                        .filter(|_| matches!(spec.kind, FieldKind::Number))
+                        .map(|range| format!("{} ({}–{})", spec.label, range.minimum, range.maximum))
+                        .unwrap_or_else(|| spec.label.to_owned());
                     let description = super::i18n::tr(super::presentation::field_hint(spec.key));
-                    let row_height = if description.is_empty() {
-                        if model.preferences.compact { 56 } else { 64 }
-                    } else if model.preferences.compact {
-                        72
+                    let title_height = self.measured_height(measure_dc, &field_label, row.label_width, self.body_font);
+                    let desc_height = self.measured_height(measure_dc, &description, row.label_width, self.body_font);
+                    let copy_height = title_height + if desc_height == 0 { 0 } else { 3 + desc_height };
+                    let pad = if model.preferences.compact { 8 } else { 12 };
+                    let row_height = if row.stacked {
+                        2 * pad + copy_height + 8 + control_height
                     } else {
-                        80
+                        2 * pad + copy_height.max(CONTROL_HEIGHT)
                     };
-                    let control_width = if matches!(spec.kind, FieldKind::Toggle) {
-                        48
-                    } else {
-                        (width * 38 / 100).clamp(130, 240)
-                    };
-                    let editor_x = card_x + 16 + width - control_width;
-                    self.column_x = card_x + 52;
-                    let label_width = (editor_x - self.column_x - 12).max(80);
-                    y = row_top + (row_height - 30) / 2;
-                    let field_label = if let Some(range) = model.ranges.get(spec.key) {
-                        format!(
-                            "{} · {}–{} {}",
-                            spec.label, range.minimum, range.maximum, range.unit
-                        )
-                    } else {
-                        spec.label.into()
-                    };
-                    let label = self.label(
-                        &field_label,
-                        row_top
-                            + if description.is_empty() {
-                                (row_height - 28) / 2
-                            } else {
-                                12
-                            },
-                        label_width,
-                        false,
-                        28,
-                    );
-                    if !description.is_empty() {
-                        let hint = self.label(&description, row_top + 38, label_width, false, 34);
-                        self.muted_labels.insert(hint as usize);
+                    let label_y = if row.stacked { row_top + pad } else { row_top + (row_height - copy_height) / 2 };
+                    let editor_y = if row.stacked { label_y + copy_height + 8 } else { row_top + (row_height - CONTROL_HEIGHT) / 2 };
+                    self.column_x = row.label_x;
+                    let label = self.label(&field_label, label_y, row.label_width, false, title_height);
+                    let scope = self.accessibility_scope();
+                    a11y::annotate(label, &a11y::key(&scope, "label", spec.key), None, None);
+                    if desc_height > 0 {
+                        let hint = self.label(&description, label_y + title_height + 3, row.label_width, false, desc_height);
                         presentation_flag(hint, "Jiks.Muted", true);
                     }
-                    a11y::annotate(
-                        label,
-                        &a11y::key(&self.accessibility_scope(), "label", spec.key),
-                        None,
-                        None,
-                    );
-                    let value = self
-                        .drafts
-                        .get(spec.key)
-                        .cloned()
-                        .unwrap_or_else(|| model.value(spec.key));
                     let id = next_field;
                     next_field += 1;
-                    let picker =
-                        main_picker(spec.key).filter(|_| matches!(spec.kind, FieldKind::Text));
-                    let available_width = control_width;
-                    let editor_width =
-                        (available_width - if picker.is_some() { 66 } else { 0 }).max(60);
-                    let options = model.options.get(spec.key).cloned();
-                    let (hwnd, kind) = match spec.kind {
-                        FieldKind::Toggle => {
+                    let editor_width = row.control_width - if picker.is_some() { 70 } else { 0 };
+                    let rect = [row.control_x, editor_y, editor_width, control_height];
+                    let (hwnd, kind) = if !editable {
+                        let options = options.unwrap_or_default();
+                        let empty = field_empty_text(&model, &spec);
+                        let display = field_display(&options, &value, &empty);
+                        let h = self.placed(
+                            "STATIC", &display,
+                            SS_CENTER | SS_CENTERIMAGE | SS_ENDELLIPSIS | SS_NOPREFIX,
+                            id, rect, self.body_font,
+                        );
+                        presentation_flag(h, "Jiks.Muted", value.is_null());
+                        (h, BindingKind::Display { options, empty })
+                    } else if let Some(mut options) = options {
+                        if show_list {
                             let h = self.placed(
-                                "BUTTON",
-                                "",
-                                BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
-                                id,
-                                [editor_x, y, editor_width, 30],
-                                self.body_font,
+                                "LISTBOX", "", WS_BORDER | WS_TABSTOP | WS_VSCROLL | WS_HSCROLL
+                                    | LBS_NOTIFY as u32 | LBS_NOINTEGRALHEIGHT as u32,
+                                id, rect, self.body_font,
                             );
-                            SendMessageW(
-                                h,
-                                BM_SETCHECK,
-                                if value.as_bool().unwrap_or(false) {
-                                    BST_CHECKED as usize
-                                } else {
-                                    BST_UNCHECKED as usize
-                                },
-                                0,
-                            );
-                            (h, BindingKind::Toggle)
-                        }
-                        FieldKind::Text | FieldKind::Number | FieldKind::ReadOnly => {
-                            let numeric = matches!(spec.kind, FieldKind::Number);
-                            let h = self.placed(
-                                "EDIT",
-                                &scalar(&value),
-                                WS_BORDER
-                                    | WS_TABSTOP
-                                    | ES_AUTOHSCROLL as u32
-                                    | if matches!(spec.kind, FieldKind::ReadOnly) {
-                                        ES_READONLY as u32
-                                    } else {
-                                        0
-                                    },
-                                id,
-                                [editor_x, y, editor_width, 30],
-                                self.body_font,
-                            );
-                            SendMessageW(h, EM_SETLIMITTEXT, 65536, 0);
-                            (
-                                h,
-                                if numeric {
-                                    BindingKind::Number
-                                } else {
-                                    BindingKind::Text
-                                },
-                            )
-                        }
-                        FieldKind::Choice(fallback) => {
-                            let mut options = options.unwrap_or(fallback);
-                            if spec.key == "packages.sort" {
-                                for option in &mut options {
-                                    option.label = super::i18n::tr(&option.label).into_owned();
-                                }
+                            for choice in &options {
+                                SendMessageW(h, LB_ADDSTRING, 0, wide(&choice.label).as_ptr() as isize);
                             }
-                            let h = self.placed(
-                                "COMBOBOX",
-                                "",
-                                CBS_DROPDOWNLIST as u32 | WS_TABSTOP | WS_VSCROLL,
-                                id,
-                                [editor_x, y, editor_width, 320],
-                                self.body_font,
-                            );
-                            set_choices(h, &options, &value);
-                            (h, BindingKind::Choice(options))
+                            let extent = options.iter().map(|choice| self.measured_button_width(measure_dc, &choice.label)).max().unwrap_or(0);
+                            SendMessageW(h, LB_SETITEMHEIGHT, 0, self.s(28) as isize);
+                            SendMessageW(h, LB_SETHORIZONTALEXTENT, self.s(extent) as usize, 0);
+                            SendMessageW(h, LB_SETCURSEL, selected_choice(&options, &value), 0);
+                            (h, BindingKind::List(options))
+                        } else {
+                        // A selectable list always has a visible selection. The
+                        // prompt has a null value and is never sent as a setting.
+                        if !options.iter().any(|option| choice_matches(option, &value)) {
+                            options.insert(0, UiChoice::new(super::i18n::tr_static("请选择"), Value::Null));
                         }
-                        FieldKind::Collection(collection) => {
-                            let options: Vec<UiChoice> = model
-                                .collections
-                                .get(collection)
-                                .map(|items| {
-                                    items
-                                        .iter()
-                                        .map(|item| {
-                                            UiChoice::new(
-                                                if item.detail.is_empty() {
-                                                    item.label.clone()
-                                                } else {
-                                                    format!("{} · {}", item.label, item.detail)
-                                                },
-                                                item.id.clone(),
-                                            )
-                                        })
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            let h = self.placed(
-                                "COMBOBOX",
-                                "",
-                                CBS_DROPDOWNLIST as u32 | WS_TABSTOP | WS_VSCROLL,
-                                id,
-                                [editor_x, y, editor_width, 360],
-                                self.body_font,
-                            );
-                            set_choices(h, &options, &value);
-                            (h, BindingKind::Choice(options))
+                        let h = self.placed(
+                            "COMBOBOX", "", CBS_DROPDOWNLIST as u32 | WS_TABSTOP | WS_VSCROLL,
+                            id, [rect[0], rect[1], rect[2], 320], self.body_font,
+                        );
+                        SendMessageW(h, CB_SETITEMHEIGHT, usize::MAX, self.s(CONTROL_HEIGHT - 6) as isize);
+                        SendMessageW(h, CB_SETITEMHEIGHT, 0, self.s(28) as isize);
+                        let drop_width = options.iter().map(|choice| choice.label.chars().count() as i32 * 12 + 32)
+                            .max().unwrap_or(editor_width).clamp(editor_width, editor_width.max(360));
+                        SendMessageW(h, CB_SETDROPPEDWIDTH, self.s(drop_width) as usize, 0);
+                        set_choices(h, &options, &value);
+                        (h, BindingKind::Choice(options))
                         }
+                    } else if matches!(spec.kind, FieldKind::Toggle) {
+                        let h = self.placed("BUTTON", "", BS_AUTOCHECKBOX as u32 | WS_TABSTOP, id, rect, self.body_font);
+                        SendMessageW(h, BM_SETCHECK, if value.as_bool() == Some(true) { BST_CHECKED } else { BST_UNCHECKED } as usize, 0);
+                        (h, BindingKind::Toggle)
+                    } else {
+                        let h = self.placed("EDIT", &scalar(&value), WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32, id, rect, self.body_font);
+                        SendMessageW(h, EM_SETLIMITTEXT, 65536, 0);
+                        SendMessageW(h, EM_SETCUEBANNER, 0, wide(super::i18n::tr_static("请输入")).as_ptr() as isize);
+                        let kind = if matches!(spec.kind, FieldKind::Number) { BindingKind::Number } else { BindingKind::Text };
+                        (h, kind)
                     };
-                    let help = model
-                        .capabilities
-                        .get(spec.key)
+                    let help = model.capabilities.get(spec.key)
                         .filter(|cap| !cap.available)
                         .map(|cap| cap.reason.clone())
-                        .or_else(|| {
-                            (!spec.capability.is_empty() && !model.can(spec.capability))
-                                .then(|| model.unavailable_reason(spec.capability))
-                        })
+                        .or_else(|| (!spec.capability.is_empty() && !model.can(spec.capability))
+                            .then(|| model.unavailable_reason(spec.capability)))
                         .filter(|reason| !reason.is_empty());
-                    a11y::annotate(
-                        hwnd,
-                        &a11y::key(&self.accessibility_scope(), "field", spec.key),
-                        Some(spec.label),
-                        help.as_deref(),
-                    );
-                    EnableWindow(
-                        hwnd,
-                        if model
-                            .capabilities
-                            .get(spec.key)
-                            .map(|cap| cap.available)
-                            .unwrap_or_else(|| {
-                                spec.capability.is_empty() || model.can(spec.capability)
-                            })
-                        {
-                            1
-                        } else {
-                            0
-                        },
-                    );
+                    a11y::annotate(hwnd, &a11y::key(&scope, "field", spec.key), Some(spec.label), help.as_deref());
                     self.bindings.push(Binding {
                         key: spec.key.into(),
                         hwnd,
@@ -2990,102 +3134,28 @@ impl App {
                     if let Some(kind) = picker {
                         let picker_id = id + 8000;
                         let browse = self.placed(
-                            "BUTTON",
-                            &super::i18n::tr("浏览…"),
-                            BS_OWNERDRAW as u32 | WS_TABSTOP,
-                            picker_id,
-                            [editor_x + editor_width + 6, y, 60, 30],
-                            self.body_font,
+                            "BUTTON", &super::i18n::tr("浏览…"), BS_OWNERDRAW as u32 | WS_TABSTOP,
+                            picker_id, [row.control_x + editor_width + 6, editor_y, 64, CONTROL_HEIGHT], self.body_font,
                         );
-                        EnableWindow(browse, IsWindowEnabled(hwnd));
                         a11y::annotate(
                             browse,
-                            &a11y::key(&self.accessibility_scope(), "browse", spec.key),
+                            &a11y::key(&scope, "browse", spec.key),
                             Some(&format!("{} · {}", spec.label, super::i18n::tr("浏览…"))),
                             None,
                         );
                         self.pickers.insert(picker_id, (spec.key.into(), kind));
                     }
                     self.cards.push(CardSurface {
-                        rect: [card_x, row_top, width + 32, row_height - 4],
+                        rect: [card_x, row_top, width + 32, row_height],
                         icon: Some(super::presentation::field_icon(spec.key)),
                     });
-                    self.column_x = header_x;
-                    y = row_top + row_height + 4;
-                }
-                let mut x = self.column_x;
-                let mut unavailable: BTreeMap<String, Vec<String>> = BTreeMap::new();
-                for action in section.actions {
-                    let card_link = self.page == Page::Settings
-                        && matches!(
-                            action.kind,
-                            ActionKind::Document(_) | ActionKind::SensorSettings
-                        );
-                    let button_width = if card_link {
-                        width
-                    } else {
-                        ((action.label.chars().count() as i32 * 15) + 30).clamp(96, 230)
-                    };
-                    if card_link && x != self.column_x {
-                        x = self.column_x;
-                        y += 42;
-                    }
-                    if x + button_width > self.column_x + width {
-                        x = self.column_x;
-                        y += 42;
-                    }
-                    let id = next_button;
-                    next_button += 1;
-                    let h = self.placed(
-                        "BUTTON",
-                        action.label,
-                        BS_OWNERDRAW as u32 | WS_TABSTOP,
-                        id,
-                        [x, y + 6, button_width, if card_link { 48 } else { 32 }],
-                        self.body_font,
-                    );
-                    if card_link {
-                        presentation_flag(h, "Jiks.ActionCard", true);
-                    }
-                    let available = action.capability.is_empty() || model.can(action.capability);
-                    a11y::annotate(
-                        h,
-                        &a11y::key(&section_scope, "action", &action_key(&action)),
-                        None,
-                        (!available)
-                            .then(|| model.unavailable_reason(action.capability))
-                            .as_deref(),
-                    );
-                    EnableWindow(h, available as i32);
-                    if !available {
-                        let reason = model.unavailable_reason(action.capability);
-                        unavailable
-                            .entry(reason)
-                            .or_default()
-                            .push(action.label.to_owned());
-                    }
-                    self.buttons.insert(id, action);
-                    if card_link {
-                        x = self.column_x;
-                        y += 56;
-                    } else {
-                        x += button_width + 10;
+                    self.column_x = card_x + 16;
+                    y = row_top + row_height + 8;
+                    if let Some(actions) = attached_actions.remove(spec.key) {
+                        y = self.render_actions(actions, &section_scope, &mut next_button, measure_dc, [card_x, y, width + 32], &model);
                     }
                 }
-                y += 52;
-                for (reason, actions) in unavailable {
-                    let h = self.label(
-                        &format!("{}：{}", actions.join("、"), reason),
-                        y,
-                        width,
-                        false,
-                        52,
-                    );
-                    presentation_flag(h, "Jiks.Surface", false);
-                    presentation_flag(h, "Jiks.Muted", true);
-                    y += 56;
-                }
-                y += 20;
+                y = self.render_actions(remaining_actions, &section_scope, &mut next_button, measure_dc, [card_x, y, width + 32], &model) + GROUP_GAP;
                 if two_columns {
                     bottoms[column] = y;
                 }
@@ -3093,8 +3163,9 @@ impl App {
             if two_columns {
                 y = bottoms[0].max(bottoms[1]);
             }
-            self.column_x = 132;
+            self.column_x = CONTENT_X;
             self.content_height = y;
+            if !measure_dc.is_null() { ReleaseDC(self.hwnd, measure_dc); }
             self.position_content();
             self.layout_fixed();
             self.rendering = false;
@@ -3105,16 +3176,15 @@ impl App {
                 (ID_LOG, "tools.open_logs"),
                 (ID_THEME, "app.preferences.save"),
             ] {
-                EnableWindow(GetDlgItem(self.hwnd, id as i32), model.can(command) as i32);
+                EnableWindow(GetDlgItem(self.hwnd, id as i32), toolbar_available(&model, id, command) as i32);
             }
             text(
                 self.machine,
                 &format!("{}  ·  {}", model.machine, model.version),
             );
-            text(
-                self.notice,
-                a11y::diagnostic().as_deref().unwrap_or(&model.notice),
-            );
+            if self.feedback_until.is_none() || get_text(self.notice).is_empty() {
+                text(self.notice, a11y::diagnostic().as_deref().unwrap_or_else(|| status_caption(&model)));
+            }
             InvalidateRect(self.hwnd, null(), 1);
             #[cfg(debug_assertions)]
             super::capture_fixture::queue(self.hwnd, &self.bridge, &self.accessibility_scope());
@@ -3122,43 +3192,25 @@ impl App {
     }
     unsafe fn position_content(&mut self) {
         unsafe {
-            let (_, height) = self.size();
-            let viewport = (height - 188).max(100);
-            let maximum = (self.content_height - 124 - viewport).max(0);
-            self.scroll = self.scroll.clamp(0, maximum);
-            let info = SCROLLINFO {
-                cbSize: size_of::<SCROLLINFO>() as u32,
-                fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
-                nMin: 0,
-                nMax: (self.content_height - 124).max(0),
-                nPage: viewport as u32,
-                nPos: self.scroll,
-                nTrackPos: 0,
-            };
-            SetScrollInfo(self.hwnd, SB_VERT, &info, 1);
-            for p in &self.content {
-                let r = p.rect;
-                let y = r[1] - if p.pinned { 0 } else { self.scroll };
-                SetWindowPos(
-                    p.hwnd,
-                    null_mut(),
-                    self.s(r[0]),
-                    self.s(y),
-                    self.s(r[2]),
-                    self.s(r[3]),
-                    SWP_NOZORDER | SWP_NOACTIVATE,
-                );
-                let visible =
-                    clip_to_viewport(p.hwnd, y, r[2], p.clip_height, 114, height - 58, self.dpi);
-                ShowWindow(p.hwnd, if visible { SW_SHOWNA } else { SW_HIDE });
-            }
-            InvalidateRect(self.hwnd, null(), 0);
+            let (width, height) = self.size();
+            let bottom = height - FOOTER_HEIGHT;
+            self.scrolling.place(
+                self.hwnd,
+                &mut self.scroll,
+                Viewport {
+                    bounds: [CONTENT_X - 12, VIEW_TOP, width - 12, bottom],
+                    extent: (self.content_height - VIEW_TOP).max(0),
+                    page: bottom - VIEW_TOP,
+                    dpi: self.dpi,
+                },
+                &mut self.content,
+            );
         }
     }
     unsafe fn capture(&mut self) {
         unsafe {
             for binding in &self.bindings {
-                if let Ok(value) = read_binding(binding) {
+                if !matches!(binding.kind, BindingKind::Display { .. }) && let Ok(value) = read_binding(binding) {
                     if self.dirty.contains(&binding.key) || binding.key.starts_with("selection.") {
                         self.drafts.insert(binding.key.clone(), value);
                     }
@@ -3196,6 +3248,7 @@ impl App {
                 if let Some(page) = Page::ALL.get(index.max(0) as usize) {
                     self.capture();
                     self.page = *page;
+                    self.scrolling.cancel(self.hwnd);
                     self.scroll = 0;
                     self.render();
                 }
@@ -3204,6 +3257,7 @@ impl App {
             if id >= ID_NAV && id < ID_NAV + Page::ALL.len() as u16 {
                 self.capture();
                 self.page = Page::ALL[(id - ID_NAV) as usize];
+                self.scrolling.cancel(self.hwnd);
                 self.scroll = 0;
                 self.render();
                 return;
@@ -3227,9 +3281,12 @@ impl App {
                     return;
                 }
                 let model = live_snapshot(&self.bridge);
-                let command = if id == ID_DEVICE {
-                    "device.details"
-                } else if id == ID_LOG {
+                if id == ID_THEME && model.value("backend.read_only").as_bool() == Some(true) {
+                    self.preview_theme = Some(if paper() & 0xff < 128 { "light" } else { "dark" });
+                    self.sync_palette(&model);
+                    return;
+                }
+                let command = if id == ID_LOG {
                     "tools.open_logs"
                 } else {
                     "app.preferences.save"
@@ -3275,6 +3332,7 @@ impl App {
             if id >= ID_TOOL_NAV && id < ID_TOOL_NAV + 8 {
                 self.capture();
                 self.tools_tab = (id - ID_TOOL_NAV) as usize;
+                self.scrolling.cancel(self.hwnd);
                 self.scroll = 0;
                 self.render();
                 return;
@@ -3346,9 +3404,9 @@ impl App {
                     if command == "tools.about" {
                         message(
                             self.hwnd,
-                            "关于机控",
+                            "关于拯救者工具箱",
                             &format!(
-                                "机控 / Jiks {}\nRust原生Win32实现 · GPL-3.0\n基于Lenovo Legion Toolkit迁移，原版设备信息、OSD及功能设计归原作者。\n源码：github.com/gura8390/Y7000P-IRX10",
+                                "拯救者工具箱 {}\nRust原生Win32实现 · GPL-3.0\n基于Lenovo Legion Toolkit迁移，原版设备信息、OSD及功能设计归原作者。\n源码：github.com/gura8390/Y7000P-IRX10",
                                 env!("CARGO_PKG_VERSION")
                             ),
                             false,
@@ -3363,7 +3421,8 @@ impl App {
                     if question.is_some_and(|body| !confirm(self.hwnd, body)) {
                         return;
                     }
-                    let fields = if command == "app.preferences.save" {
+                    let changed_fields_only = matches!(command, "app.preferences.save" | "gpu.settings.save");
+                    let fields = if changed_fields_only {
                         fields
                             .into_iter()
                             .filter(|field| self.dirty.contains(*field))
@@ -3371,7 +3430,7 @@ impl App {
                     } else {
                         fields
                     };
-                    if command == "app.preferences.save" && fields.is_empty() {
+                    if changed_fields_only && fields.is_empty() {
                         text(self.notice, "没有需要保存的更改");
                         return;
                     }
@@ -3439,6 +3498,13 @@ impl App {
                     self.deferred_editor = Some(DeferredEditor::Document(document.into()));
                     Ok(())
                 }
+                ActionKind::Navigate(page) => {
+                    self.page = page;
+                    self.scrolling.cancel(self.hwnd);
+                    self.scroll = 0;
+                    self.render();
+                    Ok(())
+                }
                 ActionKind::Cancel(fields) => {
                     for field in fields {
                         self.drafts.remove(field);
@@ -3453,6 +3519,19 @@ impl App {
             }
         }
     }
+    unsafe fn sync_palette(&mut self, model: &UiModel) {
+        unsafe {
+            if apply_palette(model, self.preview_theme) {
+                apply_window_chrome(self.hwnd);
+                DeleteObject(self.brush);
+                DeleteObject(self.surface_brush);
+                self.brush = CreateSolidBrush(paper());
+                self.surface_brush = CreateSolidBrush(surface());
+                RedrawWindow(self.hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+            }
+        }
+    }
+
     unsafe fn refresh(&mut self) {
         unsafe {
             if !self.smoke_submitted
@@ -3606,10 +3685,16 @@ impl App {
                 self.capture();
                 self.page = Page::Settings;
                 self.tools_tab = catalog::UPDATE_TAB;
+                self.scrolling.cancel(self.hwnd);
+                self.scroll = 0;
                 self.render();
             }
             self.report_visibility();
             let background_model = live_snapshot(&self.bridge);
+            if self.feedback_until.is_some_and(|until| Instant::now() >= until) {
+                self.feedback_until = None;
+                if self.pending.is_empty() { text(self.notice, status_caption(&background_model)); }
+            }
             if !self.language_prompted
                 && self.bridge.startup_language_prompt
                 && self.bridge.smoke_close_after.is_none()
@@ -3687,30 +3772,20 @@ impl App {
                 self.timer_ms = desired;
                 SetTimer(self.hwnd, TIMER, desired, None);
             }
-            if apply_palette(&model) {
-                DeleteObject(self.brush);
-                DeleteObject(self.surface_brush);
-                self.brush = CreateSolidBrush(paper());
-                self.surface_brush = CreateSolidBrush(surface());
-                RedrawWindow(
-                    self.hwnd,
-                    null(),
-                    null_mut(),
-                    RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
-                );
-            }
+            self.sync_palette(&model);
             for (id, command) in [
                 (ID_DEVICE, "device.details"),
                 (ID_LOG, "tools.open_logs"),
                 (ID_THEME, "app.preferences.save"),
             ] {
-                EnableWindow(GetDlgItem(self.hwnd, id as i32), model.can(command) as i32);
+                EnableWindow(GetDlgItem(self.hwnd, id as i32), toolbar_available(&model, id, command) as i32);
             }
             if model.shutdown_ready {
                 self.deferred_destroy = true;
                 return;
             }
-            if model.metadata_revision != self.metadata_revision && IsWindowVisible(self.hwnd) != 0
+            if (model.metadata_revision != self.metadata_revision || backend_state(&model) != self.backend_state)
+                && IsWindowVisible(self.hwnd) != 0
             {
                 self.capture();
                 self.render();
@@ -3719,6 +3794,7 @@ impl App {
             for (request, shutdown) in &self.pending {
                 if let Some(result) = model.result(*request) {
                     text(self.notice, &result.message);
+                    self.feedback_until = Some(Instant::now() + Duration::from_secs(6));
                     if *shutdown && result.ok {
                         self.deferred_destroy = true;
                         return;
@@ -3736,18 +3812,18 @@ impl App {
                     self.machine,
                     &format!("{}  ·  {}", model.machine, model.version),
                 );
-                if self.pending.is_empty() {
-                    text(self.notice, &model.notice);
+                if self.pending.is_empty() && self.feedback_until.is_none() {
+                    text(self.notice, status_caption(&model));
                 }
                 for placed in &self.metrics {
                     if let Some(metric) = model.metrics.iter().find(|m| m.key == placed.key) {
                         let mut changed = false;
                         for (hwnd, value) in [
-                            (placed.name, &metric.label),
-                            (placed.value, &metric.value),
-                            (placed.detail, &metric.detail),
+                            (placed.name, metric_caption(metric, placed.compact)),
+                            (placed.value, metric.value.as_str()),
+                            (placed.detail, metric.detail.as_str()),
                         ] {
-                            if get_text(hwnd) != *value {
+                            if !hwnd.is_null() && get_text(hwnd) != value {
                                 text(hwnd, value);
                                 changed = true;
                             }
@@ -3760,22 +3836,18 @@ impl App {
                                     "{} {} {}",
                                     metric.label, metric.value, metric.detail
                                 )),
-                                None,
+                                Some(&metric.detail),
                             );
                         }
                     }
                 }
-                for binding in &mut self.bindings {
-                    EnableWindow(
-                        binding.hwnd,
-                        model
-                            .capabilities
-                            .get(&binding.key)
-                            .map(|cap| cap.available)
-                            .unwrap_or_else(|| {
-                                binding.capability.is_empty() || model.can(&binding.capability)
-                            }) as i32,
-                    );
+                for binding in &self.bindings {
+                    if !matches!(binding.kind, BindingKind::Display { .. }) {
+                        let enabled = field_available(&model, &binding.key, &binding.capability);
+                        if (IsWindowEnabled(binding.hwnd) != 0) != enabled {
+                            EnableWindow(binding.hwnd, enabled as i32);
+                        }
+                    }
                     if !self.dirty.contains(&binding.key) {
                         set_binding(binding, &model.value(&binding.key));
                     }
@@ -4125,8 +4197,8 @@ impl App {
             self.tray_data.uID = 1;
             self.tray_data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
             self.tray_data.uCallbackMessage = WM_TRAY;
-            self.tray_data.hIcon = LoadIconW(null_mut(), IDI_APPLICATION);
-            copy_wide(&mut self.tray_data.szTip, "机控 / Jiks");
+            self.tray_data.hIcon = app_icon();
+            copy_wide(&mut self.tray_data.szTip, "拯救者工具箱");
             self.tray = Shell_NotifyIconW(NIM_ADD, &self.tray_data) != 0;
             if self.tray {
                 self.tray_data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
@@ -4148,7 +4220,7 @@ impl App {
                 .join(" · ");
             copy_wide(
                 &mut self.tray_data.szTip,
-                &format!("机控 / Jiks\n{summary}"),
+                &format!("拯救者工具箱\n{summary}"),
             );
             Shell_NotifyIconW(NIM_MODIFY, &self.tray_data);
         }
@@ -4194,17 +4266,18 @@ impl App {
                 menu,
                 MF_STRING,
                 ID_TRAY_OPEN,
-                wide(&super::i18n::tr("显示机控")).as_ptr(),
+                wide(&super::i18n::tr("显示拯救者工具箱")).as_ptr(),
             );
             AppendMenuW(
                 menu,
                 MF_STRING,
                 ID_TRAY_EXIT,
-                wide(&super::i18n::tr("退出机控")).as_ptr(),
+                wide(&super::i18n::tr("退出拯救者工具箱")).as_ptr(),
             );
             let mut point: POINT = zeroed();
             GetCursorPos(&mut point);
             SetForegroundWindow(self.hwnd);
+            self.scrolling.cancel(self.hwnd);
             let command = TrackPopupMenu(
                 menu,
                 TPM_RETURNCMD | TPM_RIGHTBUTTON,
@@ -4218,6 +4291,7 @@ impl App {
             PostMessageW(self.hwnd, WM_NULL, 0, 0);
             if command >= ID_NAV as usize && command < ID_NAV as usize + Page::ALL.len() {
                 self.page = Page::ALL[command - ID_NAV as usize];
+                self.scrolling.cancel(self.hwnd);
                 self.scroll = 0;
                 self.foreground();
                 self.capture();
@@ -4282,10 +4356,7 @@ pub(super) unsafe fn set_choices(hwnd: HWND, options: &[UiChoice], value: &Value
             SendMessageW(hwnd, CB_ADDSTRING, 0, wide(&option.label).as_ptr() as isize);
         }
         if !options.is_empty() {
-            let index = options
-                .iter()
-                .position(|o| o.value == *value || scalar(&o.value) == scalar(value))
-                .unwrap_or(usize::MAX);
+            let index = selected_choice(options, value);
             SendMessageW(hwnd, CB_SETCURSEL, index, 0);
         }
     }
@@ -4319,6 +4390,11 @@ unsafe fn read_binding(binding: &Binding) -> Result<Value> {
                         .unwrap_or(Value::Null)
                 }
             }
+            BindingKind::List(options) => {
+                let index = SendMessageW(binding.hwnd, LB_GETCURSEL, 0, 0);
+                options.get(index as usize).map_or(Value::Null, |option| option.value.clone())
+            }
+            BindingKind::Display { .. } => Value::Null,
         })
     }
 }
@@ -4344,11 +4420,23 @@ unsafe fn set_binding(binding: &Binding, value: &Value) {
                 }
             }
             BindingKind::Choice(options) => {
-                let index = options
-                    .iter()
-                    .position(|o| o.value == *value || scalar(&o.value) == scalar(value))
-                    .unwrap_or(usize::MAX);
-                SendMessageW(binding.hwnd, CB_SETCURSEL, index, 0);
+                let index = selected_choice(options, value);
+                if SendMessageW(binding.hwnd, CB_GETCURSEL, 0, 0) as usize != index {
+                    SendMessageW(binding.hwnd, CB_SETCURSEL, index, 0);
+                }
+            }
+            BindingKind::List(options) => {
+                let index = selected_choice(options, value);
+                if SendMessageW(binding.hwnd, LB_GETCURSEL, 0, 0) as usize != index {
+                    SendMessageW(binding.hwnd, LB_SETCURSEL, index, 0);
+                }
+            }
+            BindingKind::Display { options, empty } => {
+                let caption = field_display(options, value, empty);
+                if get_text(binding.hwnd) != caption {
+                    presentation_flag(binding.hwnd, "Jiks.Muted", value.is_null());
+                    text(binding.hwnd, &caption);
+                }
             }
         }
     }
@@ -4436,7 +4524,8 @@ mod presentation_regression_tests {
                 }
             }
             assert!(
-                darkest >= 0x60 && darkest < 0xc0,
+                darkest >= (muted() & 0xff).saturating_sub(3)
+                    && darkest <= (muted() & 0xff) + 18,
                 "muted text should be gray rather than primary ink: {darkest}"
             );
             fill(
@@ -4481,52 +4570,6 @@ mod presentation_regression_tests {
             DestroyWindow(parent);
             DeleteObject(body_font);
             UnregisterClassW(class.as_ptr(), GetModuleHandleW(null()));
-        }
-    }
-    #[test]
-    fn tall_controls_remain_partly_visible_at_both_viewport_edges() {
-        unsafe {
-            let parent = CreateWindowExW(
-                0,
-                wide("STATIC").as_ptr(),
-                null(),
-                WS_OVERLAPPEDWINDOW,
-                0,
-                0,
-                400,
-                400,
-                null_mut(),
-                null_mut(),
-                GetModuleHandleW(null()),
-                null(),
-            );
-            let child = CreateWindowExW(
-                0,
-                wide("STATIC").as_ptr(),
-                null(),
-                WS_CHILD,
-                0,
-                0,
-                240,
-                136,
-                parent,
-                null_mut(),
-                GetModuleHandleW(null()),
-                null(),
-            );
-            let region = CreateRectRgn(0, 0, 0, 0);
-            assert!(clip_to_viewport(child, 150, 240, 136, 90, 255, 96));
-            assert_ne!(GetWindowRgn(child, region), ERROR);
-            let mut bounds: RECT = zeroed();
-            GetRgnBox(region, &mut bounds);
-            assert_eq!((bounds.top, bounds.bottom), (0, 105));
-            assert!(clip_to_viewport(child, 86, 240, 136, 90, 255, 96));
-            GetWindowRgn(child, region);
-            GetRgnBox(region, &mut bounds);
-            assert_eq!((bounds.top, bounds.bottom), (4, 136));
-            assert!(!clip_to_viewport(child, 300, 240, 136, 90, 255, 96));
-            DeleteObject(region);
-            DestroyWindow(parent);
         }
     }
     #[test]

@@ -7,11 +7,16 @@ mod capture_fixture;
 mod device_information;
 mod editors;
 mod i18n;
+#[path = "ui/shell_layout.rs"]
+mod layout;
 mod native;
 mod notifications;
 mod overlay;
 mod presentation;
+mod scrolling;
 mod selectors;
+#[cfg(debug_assertions)]
+mod scroll_trace;
 mod sensors;
 mod status_popup;
 pub use crate::ui_model::UiBridge;

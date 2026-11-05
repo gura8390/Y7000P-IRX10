@@ -163,7 +163,7 @@ fn marker(kind: usize) -> &'static str {
         "TouchpadLock" => "触控",
         "UpdateAvailable" => "更新",
         "ITSMode" => "AI",
-        _ => "机控",
+        _ => "拯救者工具箱",
     }
 }
 pub(super) fn default_text(kind: usize) -> &'static str {
@@ -173,7 +173,7 @@ pub(super) fn default_text(kind: usize) -> &'static str {
         2 => "电源适配器已断开",
         3 => "飞行模式已开启",
         4 => "飞行模式已关闭",
-        5 => "机控自动化通知",
+        5 => "拯救者工具箱自动化通知",
         6 => "相机已开启",
         7 => "相机已关闭",
         8 => "大写锁定已开启",

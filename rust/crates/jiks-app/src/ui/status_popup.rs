@@ -654,7 +654,7 @@ impl Owned {
             self.hwnd = CreateWindowExW(
                 WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
                 wide(CLASS).as_ptr(),
-                wide(label("机控 · 本机状态", "Jiks · Status")).as_ptr(),
+                wide(label("拯救者工具箱 · 本机状态", "拯救者工具箱 · Status")).as_ptr(),
                 WS_POPUP | WS_BORDER | WS_CLIPCHILDREN,
                 bounds.left,
                 bounds.top,
@@ -838,7 +838,7 @@ impl StatusPopup {
                 state.update(model, GetTickCount64())?;
                 SetWindowTextW(
                     window.hwnd,
-                    wide(label("机控 · 本机状态", "Jiks · Status")).as_ptr(),
+                    wide(label("拯救者工具箱 · 本机状态", "拯救者工具箱 · Status")).as_ptr(),
                 );
                 SetWindowTextW(state.close, wide(label("关闭", "Close")).as_ptr());
                 state.annotate_controls(window.hwnd);
@@ -914,7 +914,7 @@ impl StatusPopup {
             if changed_language {
                 SetWindowTextW(
                     window.hwnd,
-                    wide(label("机控 · 本机状态", "Jiks · Status")).as_ptr(),
+                    wide(label("拯救者工具箱 · 本机状态", "拯救者工具箱 · Status")).as_ptr(),
                 );
                 SetWindowTextW(state.close, wide(label("关闭", "Close")).as_ptr());
                 state.annotate_controls(window.hwnd);

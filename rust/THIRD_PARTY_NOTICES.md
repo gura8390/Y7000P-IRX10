@@ -1,10 +1,12 @@
 # Third-party notices
 
-Jiks is a GPL-3.0-only larger work; see `LICENSE`. Explicitly MPL-2.0-marked
+拯救者工具箱 is a GPL-3.0-only larger work; see `LICENSE`. Explicitly MPL-2.0-marked
 sensor files retain their file-level license. The user interface and native
 adapters were derived from the behavior and source of Lenovo Legion Toolkit,
 including contributions by Bartosz Cichecki, Kaguya, Dr. Skinner and contributors.
 The C# upstream license and attribution remain in the repository's C# branch.
+The executable, window, and tray use the original application icon from
+`LenovoLegionToolkit.WPF/Assets/icon.ico` in the C# 2.34.0.3 source.
 
 The exact Cargo dependency graph is recorded in `Cargo.lock`. The source package
 retains those crates' upstream references; Cargo downloads their license files

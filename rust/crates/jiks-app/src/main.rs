@@ -22,8 +22,8 @@ fn main() {
             .contains(&s.as_str())
         });
         if !noninteractive {
-            let text = format!("机控未能完成启动或退出：{error:#}");
-            let title = "机控";
+            let text = format!("拯救者工具箱未能完成启动或退出：{error:#}");
+            let title = "拯救者工具箱";
             unsafe {
                 windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
                     std::ptr::null_mut(),
@@ -94,7 +94,7 @@ fn run() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "application": "机控 / Jiks", "version": env!("CARGO_PKG_VERSION"),
+                    "application": "拯救者工具箱", "version": env!("CARGO_PKG_VERSION"),
                     "read_only": true, "supported": identity.is_supported(), "identity": identity
                 }))?
             );
@@ -218,6 +218,10 @@ fn smoke_ui(seconds: u64, exercise_reentrancy: bool) -> Result<()> {
                 value: json!({"groups":groups}),
             }],
         );
+        #[cfg(debug_assertions)]
+        if let Ok(sample) = std::env::var("JIKS_UI_KEYBOARD_FIXTURE") {
+            seed_keyboard_layout_fixture(&mut state, &sample)?;
+        }
         state.touch_metadata();
     }
     let (send, receive) = mpsc::sync_channel::<UiAction>(16);
@@ -242,4 +246,52 @@ fn smoke_ui(seconds: u64, exercise_reentrancy: bool) -> Result<()> {
     let result = ui::run(bridge);
     let _ = consumer.join();
     result
+}
+
+#[cfg(debug_assertions)]
+fn seed_keyboard_layout_fixture(model: &mut ui_model::UiModel, sample: &str) -> Result<()> {
+    use serde_json::json;
+    use ui_model::{UiChoice, UiItem, UiRange};
+
+    model.set_value("backend.ready", json!(true));
+    model.set_capability("refresh", true, "");
+    model.set_capability("keyboard.candidates", true, "");
+    match sample {
+        "white" | "white-read-only" => {
+            let writable = sample == "white";
+            model.set_value("backend.read_only", json!(!writable));
+            model.set_value("keyboard.white_level", json!(1));
+            model.ranges.insert(
+                "keyboard.white_level".into(),
+                UiRange { minimum: 0, maximum: 2, step: 1, unit: String::new() },
+            );
+            for capability in ["keys.apply", "keyboard.white"] {
+                model.set_capability(
+                    capability,
+                    writable,
+                    if writable { "" } else { "当前为只读模式，硬件写入未启用" },
+                );
+            }
+        }
+        "spectrum" => {
+            model.collections.insert("keyboard.interfaces".into(), vec![UiItem::default()]);
+            model.options.insert(
+                "keyboard.profile".into(),
+                (0..=6)
+                    .map(|profile| {
+                        let label = if profile == 0 { "关闭".into() } else { format!("预设{profile}") };
+                        UiChoice::new(label, profile)
+                    })
+                    .collect(),
+            );
+            model.set_value("keyboard.brightness", json!(6));
+            model.set_capability("keyboard.apply", true, "");
+            model.set_capability("keyboard.effects.refresh", true, "");
+        }
+        "unavailable" => {
+            model.collections.insert("keyboard.interfaces".into(), vec![]);
+        }
+        _ => anyhow::bail!("unknown isolated keyboard layout fixture: {sample}"),
+    }
+    Ok(())
 }

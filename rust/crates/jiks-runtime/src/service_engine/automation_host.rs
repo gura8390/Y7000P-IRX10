@@ -10,13 +10,139 @@ use crate::{
     automation_process::{NativeProcessTransport, ProcessRequest, ProcessRunner},
     automation_runtime::{self, PlannedAction, StateSource},
 };
-use jiks_core::automation::{AdapterState, AutomationDocument, AutomationEvent, AutomationState};
+use jiks_core::automation::{AdapterState, AutomationDocument, AutomationEvent, AutomationState, StepKind};
 use jiks_platform::domain::MappedFeature;
 use std::{
     collections::BTreeSet,
     sync::atomic::{AtomicBool, Ordering},
     thread::{self, JoinHandle},
 };
+
+/// Editor admission follows the same completed hardware projection as the
+/// manual controls. This only advertises editing choices; each execution
+/// still goes through payload validation and the physical coordinator.
+pub(super) fn step_capabilities(
+    projection: &hardware_projection::Projection,
+    read_only: bool,
+) -> BTreeMap<String, Capability> {
+    use StepKind::*;
+
+    automation_runtime::STEP_TYPES.iter().map(|&(id, kind)| {
+        let key = format!("automation.step.{id}");
+        let denied = |reason: &str| Capability { available: false, reason: reason.into() };
+        if read_only {
+            return (key, denied("当前为只读模式，现有规则可查看"));
+        }
+        let (route, field) = match kind {
+            Delay | Run | Notification | PlaySound | QuickAction | CloseApp | ShowApp
+            | HardwareSensors | Macro | AiEngine | Osd | OsdLockPosition => {
+                return (key, Capability { available: true, reason: String::new() });
+            }
+            ItsMode => return (key, denied("ITS 是其他机型的接口，本机不适用")),
+            DeactivateGpu => ("gpu.restart", Some("gpu.instance_id")),
+            Unknown => return (key, denied("未知动作只保留原始配置")),
+            PowerMode => ("power.apply", Some("power.mode")),
+            GodModePreset | CycleGodModePreset => ("preset.apply", None),
+            Battery => ("battery.apply", Some("battery.mode")),
+            BatteryNightCharge => ("battery.night_charge", None),
+            AlwaysOnUsb => ("power.accessories.apply", Some("power.always_on_usb")),
+            InstantBoot => ("power.accessories.apply", Some("power.instant_boot")),
+            FlipToStart => ("power.accessories.apply", Some("power.flip_to_start")),
+            DisplayBrightness => ("display.brightness", None),
+            DpiScale => ("display.dpi", None),
+            Resolution => ("display.apply", Some("display.resolution")),
+            RefreshRate => ("display.apply", Some("display.refresh_rate")),
+            Hdr => ("display.hdr", None),
+            AutoColorManagement => ("display.acm", None),
+            OverDrive => ("display.overdrive", None),
+            TurnOffMonitors => ("display.turn_off", None),
+            FnLock => ("keys.apply", Some("keys.fn_lock")),
+            WinKey => ("keys.apply", Some("keys.win_lock")),
+            TouchpadLock => ("keys.apply", Some("keys.touchpad_lock")),
+            Microphone => ("keys.apply", Some("keys.microphone_muted")),
+            Speaker => ("keys.apply", Some("speaker.muted")),
+            SpeakerVolume => ("keys.apply", Some("speaker.volume")),
+            OneLevelWhiteKeyboardBacklight => ("keyboard.white_single", None),
+            WhiteKeyboardBacklight => ("keyboard.white", None),
+            PanelLogoBacklight => ("keyboard.logo", None),
+            PortsBacklight => ("keyboard.ports", None),
+            RgbKeyboardBacklight | SpectrumKeyboardBrightness | SpectrumKeyboardProfile =>
+                ("keyboard.apply", None),
+            SpectrumKeyboardImportProfile => ("keyboard.effects.apply", None),
+            HybridMode => ("gpu.hybrid.apply", None),
+            OverclockDiscreteGpu => ("gpu.oc.apply", None),
+            Wifi => ("network.apply", Some("network.wifi")),
+            AirplaneMode => ("network.apply", Some("network.airplane")),
+            FanMaxSpeed => ("preset.apply", Some("fan.full_speed")),
+        };
+        let mut cap = projection.capabilities.get(route).cloned()
+            .unwrap_or_else(|| denied("尚未完成此动作的本机能力读取"));
+        if cap.available && let Some(field) = field {
+            let known = projection.values.get(field).is_some_and(|v| !v.is_null())
+                || projection.options.get(field).is_some_and(|values| !values.is_empty())
+                || projection.ranges.contains_key(field);
+            if !known {
+                cap = denied("当前只核对了同组的其他功能；此动作需要单独的本机读回");
+            }
+        }
+        (key, cap)
+    }).collect()
+}
+
+/// Reuse an existing observation so a rule cannot wake a GPU to make it
+/// eligible for restart. Require both identifiers from actual local inventory.
+fn automation_gpu_restart_target(cache: &BTreeMap<String, Value>, now: u64) -> Result<String> {
+    use jiks_platform::{gpu_management::GpuDeviceNode, gpu_sensors::GpuSample, gpu_status::GpuState};
+
+    let gpu = cache.get("gpu").and_then(Value::as_array)
+        .filter(|items| items.len() == 1).map(|items| &items[0])
+        .context("请先读取唯一的 NVIDIA 独显库存")?;
+    let index = gpu.get("index").and_then(Value::as_u64).filter(|index| *index < 64)
+        .context("独显库存缺少可核对的索引")?;
+    let name = gpu.get("name").and_then(Value::as_str).filter(|name| !name.is_empty())
+        .context("独显库存缺少可核对的名称")?;
+    let node: GpuDeviceNode = serde_json::from_value(cache.get("gpu.nodes")
+        .and_then(Value::as_array).filter(|items| items.len() == 1)
+        .map(|items| items[0].clone()).context("需要已读取的唯一 NVIDIA PnP 设备")?)?;
+    ensure!(
+        node.started && node.problem_code == 0
+            && node.description.eq_ignore_ascii_case(name)
+            && node.instance_id.to_ascii_uppercase().starts_with("PCI\\VEN_10DE&"),
+        "独显库存和已启动的健康 PnP 设备无法唯一对应，未提交重启"
+    );
+    let sample: GpuSample = serde_json::from_value(cache.get("gpu.sensors")
+        .cloned().context("请先开启硬件传感器并查看独显实际状态；本动作不会唤醒独显")?)?;
+    let status = sample.status.as_ref().context("独显没有可核对的实时状态")?;
+    ensure!(
+        !sample.is_igpu && u64::from(sample.index) == index && sample.name == name
+            && sample.requested_at_tick_ms <= status.requested_at_tick_ms
+            && status.requested_at_tick_ms <= status.completed_at_tick_ms
+            && status.completed_at_tick_ms <= sample.completed_at_tick_ms
+            && sample.completed_at_tick_ms <= now
+            && now - sample.requested_at_tick_ms <= 2000
+            && status.raw_coproc_state == Some(1)
+            && matches!(status.classified(sample.hybrid_off), GpuState::Active | GpuState::Inactive),
+        "独显状态过期、目标变化或当前未确认已唤醒，未提交重启"
+    );
+    Ok(node.instance_id)
+}
+
+const KILL_GPU_APPS: &str = "gpu.kill_apps.automation";
+
+fn automation_gpu_kill_target(cache: &BTreeMap<String, Value>) -> Result<A> {
+    use jiks_platform::gpu_management::GpuDeviceNode;
+
+    let nodes = cache.get("gpu.nodes").and_then(Value::as_array)
+        .filter(|nodes| nodes.len() == 1)
+        .context("需要已读取的唯一 NVIDIA PnP 设备")?;
+    let node: GpuDeviceNode = serde_json::from_value(nodes[0].clone())?;
+    ensure!(
+        node.started && node.problem_code == 0 && !node.description.is_empty()
+            && node.instance_id.to_ascii_uppercase().starts_with("PCI\\VEN_10DE&"),
+        "独显设备尚未启动或状态异常，未结束应用"
+    );
+    Ok(A::KillGpuApps { index: 0, expected_name: node.description, instance_id: node.instance_id })
+}
 
 trait SourcePort {
     fn start(&mut self, options: SourceOptions) -> Result<()>;
@@ -469,9 +595,6 @@ impl AutomationHost {
             documents.insert(key.clone(), doc.clone());
         }
         let (options, _) = options_from(&documents)?;
-        if options == self.options && self.source_error.is_none() {
-            return Ok(Some(change));
-        }
         let changes_automation = change.documents.iter().any(|(key, _)| key == "automation");
         if changes_automation && self.executor.is_busy() {
             let enabled = documents
@@ -482,6 +605,12 @@ impl AutomationHost {
                 "Wait for actual automation completion before editing its running document"
             );
             self.executor.cancel("Automation disabled");
+            if let Some(operation) = engine.pending.as_ref().filter(|p| p.work.message == KILL_GPU_APPS) {
+                operation.cancel.store(true, Ordering::Release);
+            }
+        }
+        if options == self.options && self.source_error.is_none() {
+            return Ok(Some(change));
         }
         let wait_macros = change
             .documents
@@ -1220,7 +1349,24 @@ impl AutomationHost {
                 let id = engine.new_internal_request()?;
                 let mut payload = command.payload.to_value()?;
                 let result = (|| -> Result<()> {
-                    if config_command(&command.command) {
+                    if command.command == KILL_GPU_APPS {
+                        ensure!(
+                            !self.executor.is_cancelled() && !self.stopping
+                                && !engine.faulted && engine.shutdown.is_none() && engine.identity_supported,
+                            "自动化已取消或本机设备写入未授权"
+                        );
+                        engine.writable()?;
+                        engine.value("automation.gpu_kill_result", Value::Null);
+                        let action = automation_gpu_kill_target(&engine.cache)?;
+                        engine.start_work(id, KILL_GPU_APPS, vec![action], After::Hardware)
+                    } else if command.command == "gpu.restart.automation" {
+                        let instance = automation_gpu_restart_target(&engine.cache, monotonic_ms())?;
+                        engine.process(Command::Execute {
+                            request_id: id,
+                            command: "gpu.restart".into(),
+                            payload: json!({"gpu.instance_id":instance,"gpu.require_started":true}),
+                        })
+                    } else if config_command(&command.command) {
                         let context = config_actions::ActionContext::default();
                         let change = config_actions::apply_action_with_context(
                             &command.command,
@@ -1248,6 +1394,9 @@ impl AutomationHost {
                         self.executor
                             .note_inflight_failure(effect.step_token, format!("{error:#}"))?;
                     } else {
+                        if command.command == KILL_GPU_APPS {
+                            engine.value("automation.gpu_kill_result", json!({"error":format!("{error:#}")}));
+                        }
                         engine.finish(id, false, format!("{error:#}"));
                     }
                 }
@@ -1406,6 +1555,13 @@ impl AutomationHost {
                 output,
                 preset,
             } => {
+                if self.executor.is_cancelled() {
+                    if let Some(operation) = engine.pending.as_ref()
+                        .filter(|p| p.work.id == *request && p.work.message == KILL_GPU_APPS)
+                    {
+                        operation.cancel.store(true, Ordering::Release);
+                    }
+                }
                 if !pending.noted_late
                     && engine
                         .pending
@@ -1732,6 +1888,130 @@ impl AutomationHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn editor_step_capabilities_publish_and_follow_fresh_field_discovery() {
+        let mut fixture = super::super::lifecycle_tests::Fixture::new();
+        let engine = &mut fixture.engine;
+        engine.publish_configuration().unwrap();
+        let assert_cap = |engine: &Engine, id: &str, expected| {
+            let state = engine.state.lock().unwrap();
+            assert_eq!(state.capabilities[&format!("automation.step.{id}")].available, expected, "{id}");
+        };
+        assert_cap(engine, "delay", true);
+        assert_cap(engine, "notification", true);
+        assert_cap(engine, "fn_lock", false);
+        assert_cap(engine, "its_mode", false);
+        assert_cap(engine, "deactivate_gpu", false);
+        engine.cache.insert("energy".into(), json!({"fn_lock": true}));
+        engine.publish_native(false).unwrap();
+        assert_cap(engine, "fn_lock", true);
+        assert_cap(engine, "win_key", false);
+        engine.cache.remove("energy");
+        engine.publish_native(false).unwrap();
+        assert_cap(engine, "fn_lock", false);
+        engine.read_only = true;
+        engine.publish_configuration().unwrap();
+        assert_cap(engine, "delay", false);
+        assert!(fixture.log.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_restart_requires_fresh_matching_gpu_and_uses_guarded_native_route() {
+        use jiks_platform::{gpu_sensors::GpuSample, gpu_status::{GpuState, GpuStatusSnapshot}};
+
+        let mut fixture = super::super::lifecycle_tests::Fixture::new();
+        let now = monotonic_ms();
+        let name = "Synthetic NVIDIA GPU";
+        let instance = r"PCI\VEN_10DE&DEV_1234\SYNTHETIC";
+        fixture.engine.cache.insert("gpu".into(), json!([{"index":0,"name":name}]));
+        fixture.engine.cache.insert("gpu.nodes".into(), json!([{
+            "instance_id":instance,"description":name,"hardware_ids":[],"started":true,"problem_code":0
+        }]));
+        let mut sample = GpuSample::new(0, name, now);
+        sample.hybrid_off = Some(false);
+        sample.status = Some(GpuStatusSnapshot {
+            state: GpuState::Inactive,
+            raw_coproc_state: Some(1),
+            filtered_process_count: Some(0),
+            display_connected: Some(false),
+            requested_at_tick_ms: now,
+            completed_at_tick_ms: now,
+            errors: BTreeMap::new(),
+        });
+        fixture.engine.cache.insert("gpu.sensors".into(), json!(sample));
+        assert_eq!(automation_gpu_restart_target(&fixture.engine.cache, now).unwrap(), instance);
+        assert!(automation_gpu_restart_target(&fixture.engine.cache, now + 2001).is_err());
+        fixture.engine.cache.get_mut("gpu.sensors").unwrap()["status"]["raw_coproc_state"] = json!(2);
+        assert!(automation_gpu_restart_target(&fixture.engine.cache, now).is_err());
+        fixture.engine.cache.get_mut("gpu.sensors").unwrap()["status"]["raw_coproc_state"] = json!(1);
+        fixture.engine.cache.get_mut("gpu.nodes").unwrap()[0]["description"] = json!("Other GPU");
+        assert!(automation_gpu_restart_target(&fixture.engine.cache, now).is_err());
+        fixture.engine.cache.get_mut("gpu.nodes").unwrap()[0]["description"] = json!(name);
+
+        let kill = JsonNode::parse(r#"{"type":"deactivate_gpu","parameters":{"value":0}}"#).unwrap();
+        let kill = automation_runtime::step_from_ui(&kill).unwrap();
+        assert!(kill.is_dangerous_on_startup());
+        assert!(matches!(automation_runtime::translate_step(&kill, &BTreeMap::new()).unwrap(),
+            PlannedAction::Command(command) if command.command == KILL_GPU_APPS));
+        assert!(fixture.log.lock().unwrap().is_empty());
+
+        let answer = fixture.answer();
+        let mut host = AutomationHost::default();
+        host.executor = executor_with(vec![json!({"type":"deactivate_gpu","parameters":{"value":1}})]);
+        let effect = host.executor.poll(now, &BTreeMap::new()).unwrap().unwrap();
+        host.dispatch(&mut fixture.engine, effect).unwrap();
+        assert!(matches!(&fixture.log.lock().unwrap()[..],
+            [A::RestartGpu { instance_id, require_started: true }] if instance_id == instance));
+        *answer.lock().unwrap() = Some(Ok(json!({"restart_api_accepted":true,"pending_reboot":false})));
+        fixture.engine.poll_write().unwrap();
+        host.poll_effect(&mut fixture.engine).unwrap();
+        assert!(host.executor.take_completion().unwrap().failures.is_empty());
+    }
+
+    #[test]
+    fn legacy_kill_apps_submits_only_the_verified_gpu_and_keeps_partial_cancel_receipt() {
+        let mut fixture = super::super::lifecycle_tests::Fixture::new();
+        let name = "Synthetic NVIDIA GPU";
+        let instance = r"PCI\VEN_10DE&DEV_1234\SYNTHETIC";
+        fixture.engine.cache.insert("gpu.nodes".into(), json!([{
+            "instance_id":instance,"description":name,"hardware_ids":[],"started":true,"problem_code":0
+        }]));
+        let identity = json!({"pid":12,"creation_filetime":100,"executable":r"C:\fixture\game.exe"});
+        let newer = json!({"pid":12,"creation_filetime":101,"executable":r"C:\fixture\other.exe"});
+        fixture.engine.cache.insert("gpu.processes".into(), json!({
+            "processes":[
+                {"identity":identity.clone(),"preference":"Automatic"},
+                {"identity":newer.clone(),"preference":"Automatic"}
+            ]
+        }));
+        let answer = fixture.answer();
+        let mut host = AutomationHost::default();
+        host.executor = executor_with(vec![json!({"type":"deactivate_gpu","parameters":{"value":0}})]);
+        let effect = host.executor.poll(monotonic_ms(), &BTreeMap::new()).unwrap().unwrap();
+        host.dispatch(&mut fixture.engine, effect).unwrap();
+        assert!(matches!(&fixture.log.lock().unwrap()[..],
+            [A::KillGpuApps { index:0, expected_name, instance_id }]
+                if expected_name == name && instance_id == instance));
+        host.cancel();
+        host.poll_effect(&mut fixture.engine).unwrap();
+        assert!(fixture.engine.pending.as_ref().unwrap().cancel.load(Ordering::Acquire));
+        *answer.lock().unwrap() = Some(Ok(json!({
+            "completed_pids":[12],"completed_identities":[identity],"skipped":{},
+            "failed":{},"stopped":"fixture cancelled"
+        })));
+        fixture.engine.poll_write().unwrap();
+        host.poll_effect(&mut fixture.engine).unwrap();
+        let done = host.executor.take_completion().unwrap();
+        assert!(done.cancelled && !done.failures.is_empty());
+        let rows = fixture.engine.cache["gpu.processes"]["processes"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["identity"], newer);
+        let state = fixture.engine.state.lock().unwrap();
+        let report = &state.values["automation.gpu_kill_result"];
+        assert_eq!(report["completed_pids"], json!([12]));
+        assert!(report.get("completed_identities").is_none());
+    }
+
     fn executor_with(steps: Vec<Value>) -> Executor {
         use jiks_core::automation::PipelineDto;
         let steps = steps

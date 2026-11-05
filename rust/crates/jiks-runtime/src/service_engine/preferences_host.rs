@@ -1,10 +1,61 @@
 use super::*;
 use jiks_core::automation::{AdapterState, AutomationState, ordinal_ignore_case};
+
+#[cfg(test)]
+mod gpu_settings_tests {
+    use super::super::lifecycle_tests::Fixture;
+    use super::*;
+
+    #[test]
+    fn gpu_poll_interval_is_writable_without_device_discovery_or_physical_actions() {
+        let mut fixture = Fixture::new();
+        let engine = &mut fixture.engine;
+        engine.publish_configuration().unwrap();
+        {
+            let state = engine.state.lock().unwrap();
+            assert!(state.capabilities["gpu.settings.save"].available);
+            assert!(!state.capabilities["gpu.keep_awake.apply"].available);
+            assert!(!state.capabilities["gpu.pstate.apply"].available);
+        }
+
+        engine.process(Command::Execute {
+            request_id: 1,
+            command: "gpu.settings.save".into(),
+            payload: json!({"gpu.poll_ms": 1700}),
+        }).unwrap();
+        assert!(engine.state.lock().unwrap().results.iter().any(|r| r.request_id == 1 && r.ok));
+        assert!(fixture.log.lock().unwrap().is_empty());
+        assert_eq!(engine.repository.document("application").unwrap().root()
+            .get_ci("GPUMonitoringInterval").and_then(JsonNode::as_i64), Some(1700));
+
+        // An independent config capability must never bypass physical gates.
+        assert!(engine.process(Command::Execute {
+            request_id: 2,
+            command: "gpu.settings.save".into(),
+            payload: json!({"gpu.keep_awake": true}),
+        }).is_err());
+        assert!(engine.process(Command::Execute {
+            request_id: 3,
+            command: "gpu.settings.save".into(),
+            payload: json!({"gpu.locked_pstate": 2}),
+        }).is_err());
+        assert!(fixture.log.lock().unwrap().is_empty());
+        engine.read_only = true;
+        engine.publish_configuration().unwrap();
+        assert!(!engine.state.lock().unwrap().capabilities["gpu.settings.save"].available);
+        assert!(engine.process(Command::Execute {
+            request_id: 4,
+            command: "gpu.settings.save".into(),
+            payload: json!({"gpu.poll_ms": 1900}),
+        }).is_err());
+    }
+}
+
 impl Engine {
     pub(super) fn request_app_preferences(&mut self, id: u64, payload: &Value) -> Result<()> {
         self.writable()?;
         let mut fields = payload.as_object().context("应用设置必须是对象")?.clone();
-        if let Some(method)=fields.get("update.method") {ensure!(method.as_str()==Some("GitHub"),"Rust机控通过GitHub的Jiks发行资产更新；旧版Server接口不能提供本程序更新，请选择GitHub");}
+        if let Some(method)=fields.get("update.method") {ensure!(method.as_str()==Some("GitHub"),"拯救者工具箱通过 GitHub 的 Rust 发行包更新，请选择 GitHub。");}
         let autorun = fields.remove("app.autorun");
         let fnq = fields.get("power.fnq_custom").cloned();
         let change = config_actions::apply_action(
